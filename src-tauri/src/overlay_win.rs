@@ -105,8 +105,15 @@ pub fn apply_window_state(
     cfg: &OverlayConfig,
     apply_position: bool,
 ) -> Result<(), String> {
+    // 主窗口在前台时临时取消浮窗置顶：浮窗的矩形（含透明部分）会拦截鼠标，
+    // 常驻置顶的话会压在自家主窗口上，表现为"主窗口按钮点了没反应"。
+    // 主窗口失焦（回到游戏/桌面）后恢复配置里的置顶。
+    let main_focused = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
     window
-        .set_always_on_top(cfg.always_on_top)
+        .set_always_on_top(cfg.always_on_top && !main_focused)
         .map_err(warn("设置置顶失败"))?;
     window
         .set_ignore_cursor_events(cfg.click_through)

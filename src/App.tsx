@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { getConfig } from "./api";
+import { getConfig, openUrl, subscribeConfig } from "./api";
 import type { AppConfig, MovedEvent } from "./types";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
@@ -85,8 +85,14 @@ function MainShell() {
       .then((c) => alive && setConfig(c))
       .catch(console.warn);
 
+    // 命令返回的配置也直接采用：不依赖事件是否送达（见 api.ts 配置总线）
+    const offBus = subscribeConfig((c) => {
+      if (alive) setConfig(c);
+    });
+
     return () => {
       alive = false;
+      offBus();
       offs.forEach((f) => f());
     };
   }, []);
@@ -196,7 +202,15 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
 
         <div className="mt-4 space-y-1.5 rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-xs leading-5">
           <p className="text-slate-500">
-            仓库：<span className="font-mono text-slate-400">https://gitee.com/HayBranch/izuna-toolbox</span>
+            仓库：{" "}
+            <button
+              type="button"
+              onClick={() => openUrl("https://gitee.com/HayBranch/izuna-toolbox").catch(console.warn)}
+              title="在浏览器中打开仓库"
+              className="break-all font-mono text-sky-400 underline decoration-sky-500/40 underline-offset-2 transition hover:text-sky-300 hover:decoration-sky-400"
+            >
+              https://gitee.com/HayBranch/izuna-toolbox
+            </button>
           </p>
           <p className="text-slate-500">
             协议：<span className="text-slate-400">MIT License</span>

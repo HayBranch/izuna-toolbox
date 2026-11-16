@@ -17,6 +17,7 @@ import {
   setOverlayClickThrough,
   setOverlayShown,
   setOverlaySize,
+  subscribeConfig,
 } from "../api";
 import type { AppConfig } from "../types";
 import { computeVars } from "../vars";
@@ -60,11 +61,15 @@ export default function OverlayWindow() {
 
     getConfig().then(apply).catch(console.warn);
 
+    // 命令返回 / 广播到达都走同一条路（见 api.ts 配置总线）
+    const offBus = subscribeConfig(apply);
+
     const timer = setInterval(() => setTick((t) => t + 1), 30_000);
 
     return () => {
       alive = false;
       unlisten?.();
+      offBus();
       clearInterval(timer);
     };
   }, [id]);

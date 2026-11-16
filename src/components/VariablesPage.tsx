@@ -22,6 +22,7 @@ import {
 } from "../api";
 import type { AppConfig, ComputedVar, OverlayConfig, UserVar } from "../types";
 import { evalExpr, fmtNum, fmtPercent, makeLookup } from "../vars";
+import ConfirmDelete from "./ConfirmDelete";
 
 export default function VariablesPage({ config }: { config: AppConfig }) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -286,7 +287,10 @@ function VarRow({
           className="w-16 rounded-lg border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-xs text-slate-300 outline-none transition focus:border-indigo-500"
         />
       </label>
-      <DeleteButton onClick={() => { if (window.confirm(`删除变量「${draft.name}」？模板里引用它的地方会显示原文。`)) run(deleteVariable(overlayId, draft.id)); }} />
+      <ConfirmDelete
+        title={`删除变量「${draft.name}」`}
+        onConfirm={() => run(deleteVariable(overlayId, draft.id))}
+      />
     </div>
   );
 }
@@ -372,19 +376,12 @@ function ComputedRow({
             ? fmtPercent(preview, draft.decimals)
             : fmtNum(preview, draft.decimals)}
       </span>
-      <DeleteButton onClick={() => { if (window.confirm(`删除计算变量「${draft.name}」？`)) run(deleteComputed(overlayId, draft.id)); }} />
+      <ConfirmDelete
+        title={`删除计算变量「${draft.name}」`}
+        onConfirm={() => run(deleteComputed(overlayId, draft.id))}
+      />
     </div>
   );
 }
 
-function DeleteButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      title="删除"
-      className="text-sm text-slate-600 transition hover:text-rose-400"
-    >
-      🗑
-    </button>
-  );
-}
+

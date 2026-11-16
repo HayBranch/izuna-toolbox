@@ -10,24 +10,44 @@
  *
  * 编辑策略：文本类输入用本地草稿 + 300ms 防抖提交；开关类立即提交。
  * Rust 侧每次变更都会 emit config-changed，回流的新配置在输入框未聚焦时覆盖草稿。
+ * 任何命令失败都会显示在页面顶部的错误条里，不会"点了没反应"。
  */
 import { useEffect, useRef, useState } from "react";
-import { addOverlay, deleteOverlay, moveOverlay, setOverlayAlwaysTop, setOverlayClickThrough, setOverlayShown, updateOverlay } from "../api";
+import {
+  addOverlay,
+  deleteOverlay,
+  moveOverlay,
+  setOverlayAlwaysTop,
+  setOverlayClickThrough,
+  setOverlayShown,
+  updateOverlay,
+} from "../api";
 import type { AppConfig, OverlayConfig } from "../types";
 import { computeVars, varDefs } from "../vars";
 import { formatDateTime } from "../utils";
+import ConfirmDelete from "./ConfirmDelete";
 import SubtitleView from "./SubtitleView";
 
 export default function OverlaysPage({ config }: { config: AppConfig }) {
+  const [error, setError] = useState<string | null>(null);
+  const run = (p: Promise<unknown>) =>
+    p.then(() => setError(null)).catch((e) => setError(String(e)));
+
   return (
     <div className="space-y-5">
+      {error && (
+        <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-300">
+          {error}
+        </p>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm leading-6 text-slate-500">
           浮窗是无边框透明小窗，可被 OBS 等直播软件「窗口捕获」；拖动浮窗自动保存位置。
           开启「鼠标穿透」后浮窗不再响应鼠标，回这里解锁。每套浮窗的变量相互独立，在「变量与计数」页选择套编辑。
         </p>
         <button
-          onClick={() => addOverlay().catch(console.warn)}
+          onClick={() => run(addOverlay())}
           className="shrink-0 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
         >
           ＋ 新建浮窗
@@ -35,7 +55,7 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
       </div>
 
       {config.overlays.map((overlay) => (
-        <OverlayEditor key={overlay.id} overlay={overlay} />
+        <OverlayEditor key={overlay.id} overlay={overlay} run={run} />
       ))}
 
       {config.overlays.length === 0 && (
@@ -47,7 +67,13 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
   );
 }
 
-function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
+function OverlayEditor({
+  overlay,
+  run,
+}: {
+  overlay: OverlayConfig;
+  run: (p: Promise<unknown>) => void;
+}) {
   // 本套浮窗自己的变量：模板芯片与预览都用它
   const vars = computeVars(overlay, new Date());
   const defs = varDefs(overlay);
@@ -66,16 +92,13 @@ function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
   const push = (next: OverlayConfig, immediate = false) => {
     setDraft(next);
     if (timer.current) clearTimeout(timer.current);
-    const run = () => updateOverlay(next).catch(console.warn);
-    if (immediate) run();
-    else timer.current = setTimeout(run, 300);
+    const task = () => run(updateOverlay(next));
+    if (immediate) task();
+    else timer.current = setTimeout(task, 300);
   };
 
   const patch = (partial: Partial<OverlayConfig>, immediate = false) =>
     push({ ...draft, ...partial }, immediate);
-
-  // 开关走专用命令（不经过草稿，立即生效）
-  const flag = (p: Promise<unknown>) => p.catch(console.warn);
 
   /** 在光标处插入 {变量} */
   const insertVar = (key: string) => {
@@ -109,41 +132,35 @@ function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
           placeholder="浮窗名称"
           className="w-40 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-1.5 text-sm font-medium text-slate-200 outline-none transition focus:border-indigo-500"
         />
-        <span
-          title="创建时间"
-          className="font-mono text-[11px] text-slate-600"
-        >
+        <span title="创建时间" className="font-mono text-[11px] text-slate-600">
           🕒 {formatDateTime(overlay.createdAt)}
         </span>
+        {/* 开关一律以服务端配置为准（overlay.*），避免快速连点用到过期草稿 */}
         <Toggle
-          on={draft.shown}
-          label={draft.shown ? "显示中" : "已隐藏"}
-          onClick={() => flag(setOverlayShown(overlay.id, !draft.shown))}
+          on={overlay.shown}
+          label={overlay.shown ? "显示中" : "已隐藏"}
+          onClick={() => run(setOverlayShown(overlay.id, !overlay.shown))}
         />
         <Toggle
-          on={draft.alwaysOnTop}
+          on={overlay.alwaysOnTop}
           label="置顶"
-          onClick={() => flag(setOverlayAlwaysTop(overlay.id, !draft.alwaysOnTop))}
+          onClick={() => run(setOverlayAlwaysTop(overlay.id, !overlay.alwaysOnTop))}
         />
         <Toggle
-          on={draft.clickThrough}
-          label={draft.clickThrough ? "已锁定（穿透）" : "鼠标穿透"}
-          tone={draft.clickThrough ? "amber" : "default"}
-          onClick={() => flag(setOverlayClickThrough(overlay.id, !draft.clickThrough))}
+          on={overlay.clickThrough}
+          label={overlay.clickThrough ? "已锁定（穿透）" : "鼠标穿透"}
+          tone={overlay.clickThrough ? "amber" : "default"}
+          onClick={() => run(setOverlayClickThrough(overlay.id, !overlay.clickThrough))}
         />
-        <button
-          onClick={() => {
-            if (window.confirm(`删除浮窗「${draft.name}」？`)) {
-              deleteOverlay(overlay.id).catch(console.warn);
-            }
-          }}
-          className="ml-auto text-xs text-slate-600 transition hover:text-rose-400"
-        >
-          🗑 删除
-        </button>
+        <div className="ml-auto">
+          <ConfirmDelete
+            title={`删除浮窗「${overlay.name}」`}
+            onConfirm={() => run(deleteOverlay(overlay.id))}
+          />
+        </div>
       </div>
 
-      {draft.clickThrough && (
+      {overlay.clickThrough && (
         <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
           已开启鼠标穿透：浮窗不响应任何鼠标点击（不会挡住游戏操作），
           位置只能用下方 X/Y 调整，解锁也在这里。
@@ -178,7 +195,7 @@ function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
         </div>
         <p className="mt-1.5 text-xs text-slate-500">
           点击芯片在光标处插入变量；靛蓝色为计算变量（表达式自动算），
-          其余在「变量与计数」页维护。
+          其余在「变量与计数」页维护（编辑的是这一套自己的变量）。
         </p>
       </div>
 
@@ -215,10 +232,10 @@ function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
             <div className="m-auto"><SubtitleView cfg={draft} vars={vars} /></div>
           </div>
           <div className="mt-3 flex items-center gap-3">
-            <NumberField label="位置 X" value={draft.x} min={-9999} max={9999} wide
-              onChange={(v) => moveOverlay(overlay.id, v, draft.y).catch(console.warn)} />
-            <NumberField label="位置 Y" value={draft.y} min={-9999} max={9999} wide
-              onChange={(v) => moveOverlay(overlay.id, draft.x, v).catch(console.warn)} />
+            <NumberField label="位置 X" value={overlay.x} min={-9999} max={9999} wide
+              onChange={(v) => run(moveOverlay(overlay.id, v, overlay.y))} />
+            <NumberField label="位置 Y" value={overlay.y} min={-9999} max={9999} wide
+              onChange={(v) => run(moveOverlay(overlay.id, overlay.x, v))} />
             <span className="text-xs text-slate-500">拖动浮窗自动保存</span>
           </div>
         </div>
@@ -287,17 +304,42 @@ function NumberField({
   wide?: boolean;
   onChange: (v: number) => void;
 }) {
+  // 本地草稿：输入过程中不回弹，失焦/回车才提交（数字框直接绑服务端值会卡顿）
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const v = Number(text);
+    if (!Number.isFinite(v)) {
+      setText(String(value));
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, v));
+    setText(String(clamped));
+    if (clamped !== value) onChange(clamped);
+  };
+
   return (
     <label className={`block text-xs text-slate-400 ${wide ? "w-24" : ""}`}>
       {label}
       <input
         type="number"
-        value={value}
+        value={text}
         min={min}
         max={max}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v)) onChange(Math.min(max, Math.max(min, v)));
+        onFocus={() => (focused.current = true)}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          focused.current = false;
+          commit();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            (e.target as HTMLInputElement).blur();
+          }
         }}
         className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/60 px-2 py-1.5 font-mono text-sm text-slate-200 outline-none transition focus:border-indigo-500"
       />

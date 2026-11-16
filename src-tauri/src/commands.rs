@@ -57,7 +57,7 @@ pub fn get_config(store: State<'_, Arc<Store>>) -> Config {
 
 // ---------- 浮窗（套） ----------
 
-/// 新建浮窗：生成配置（默认位置 = 主显示器顶部居中）→ 落库广播 → 创建窗口。
+/// 新建浮窗：生成配置（默认位置 = 主显示器顶部居中）→ 落库 → 种入示例变量 → 建窗广播。
 #[tauri::command]
 pub fn add_overlay(
     app: AppHandle,
@@ -73,7 +73,12 @@ pub fn add_overlay(
     cfg.y = y;
 
     store.push_overlay(&cfg)?;
-    overlay_win::sync_overlay_window(&app, &cfg, true)?;
+    // 新套自带示例变量（A1-A4 + B1-B4，初始为 0），否则模板里的
+    // {A1}/{B1} 会以原文显示，看起来像坏了
+    store.seed_example_variables(id, false)?;
+    if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+        overlay_win::sync_overlay_window(&app, &cfg, true)?;
+    }
     changed(&app, &store)
 }
 
@@ -88,7 +93,7 @@ pub fn update_overlay(
     check_permission(&window, overlay.id)?;
     let overlay_id = overlay.id;
     store.update_overlay(&overlay)?;
-    sync_and_changed(&app, &store, overlay_id)
+    sync_and_changed(&app, &store, overlay_id, false)
 }
 
 /// 主窗口直接修改浮窗位置（X/Y 输入框），立即生效。
@@ -103,7 +108,8 @@ pub fn move_overlay(
 ) -> Result<Config, String> {
     check_permission(&window, id)?;
     store.move_overlay(id, x, y)?;
-    sync_and_changed(&app, &store, id)
+    // 必须应用位置（true）——这里曾经误用 false，X/Y 输入框点了不生效
+    sync_and_changed(&app, &store, id, true)
 }
 
 /// 浮窗页面内容自适应尺寸后调用：把窗口调成内容的逻辑尺寸。
@@ -137,16 +143,11 @@ pub fn set_overlay_size(
         .map_err(|e| format!("调整浮窗尺寸失败：{e}"))?;
     overlay_win::mark_measured(&app, id);
 
-    // 首次显示逻辑：量好尺寸了才亮相
-    let shown = store
-        .get()
-        .overlays
-        .iter()
-        .find(|o| o.id == id)
-        .map(|o| o.shown)
-        .unwrap_or(false);
-    if shown && !win.is_visible().unwrap_or(true) {
-        let _ = win.show();
+    // 量好尺寸后走统一的窗口状态同步（含置顶策略）再决定显隐：
+    // 不能直接 win.show()——那会让浮窗跳过"主窗口在前台时取消置顶"的判断，
+    // 一显示就可能以置顶态盖住主窗口、拦截点击。
+    if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+        overlay_win::apply_window_state(&app, &win, &cfg, false)?;
     }
     Ok(())
 }
@@ -195,7 +196,7 @@ fn set_flag_command(
 ) -> Result<Config, String> {
     check_permission(window, id)?;
     store.set_flag(id, apply)?;
-    sync_and_changed(app, store, id)
+    sync_and_changed(app, store, id, false)
 }
 
 /// 删除浮窗：连同它那套变量一起删；窗口真正关闭
@@ -335,14 +336,36 @@ pub fn delete_computed(
     changed(&app, &store)
 }
 
-/// 同步某个浮窗的窗口状态（不动位置）并广播全量配置。
+/// 同步某个浮窗的窗口状态并广播全量配置。
 fn sync_and_changed(
     app: &AppHandle,
     store: &State<'_, Arc<Store>>,
     overlay_id: i64,
+    apply_position: bool,
 ) -> Result<Config, String> {
     if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == overlay_id) {
-        overlay_win::sync_overlay_window(app, &cfg, false)?;
+        overlay_win::sync_overlay_window(app, &cfg, apply_position)?;
     }
     changed(app, store)
+}
+
+/// 用系统默认浏览器打开 http(s) 链接（供「关于」里的仓库地址点击）。
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许打开 http(s) 链接".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("打开链接失败：{e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("当前平台暂不支持直接打开链接".into())
+    }
 }

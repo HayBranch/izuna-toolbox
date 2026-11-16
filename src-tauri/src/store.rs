@@ -311,7 +311,7 @@ impl Store {
         Ok(())
     }
 
-    /// 修复：某浮窗模板引用了 {B…} 计算变量但一套都没有（旧版迁移留下的空缺）→ 补种子。
+    /// 修复：模板引用了变量但一套都没有（旧版迁移/删除变量后留下的空缺）→ 补种子。
     fn repair_missing_computed(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let ids: Vec<i64> = {
@@ -322,27 +322,41 @@ impl Store {
             rows.filter_map(|r| r.ok()).collect()
         };
         for id in ids {
-            let count: i64 = conn
+            let vcount: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM variables WHERE overlay_id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let ccount: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM computed WHERE overlay_id = ?1",
                     params![id],
                     |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
-            if count == 0 {
-                let refs_b: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM overlays WHERE id = ?1 AND template LIKE '%{B%'",
-                        params![id],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if refs_b > 0 {
-                    insert_seed_computed(&conn, id, now_ms())?;
-                }
+            let (refs_a, refs_b): (i64, i64) = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(template LIKE '%{A%'), 0), COALESCE(SUM(template LIKE '%{B%'), 0) FROM overlays WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            if vcount == 0 && ccount == 0 && (refs_a + refs_b) > 0 {
+                // 整套变量都缺 → 补一套示范（数值 0，不冒充真实数据）
+                insert_seed_vars(&conn, id, now_ms(), false)?;
+            } else if ccount == 0 && refs_b > 0 {
+                insert_seed_computed(&conn, id, now_ms())?;
             }
         }
         Ok(())
+    }
+
+    /// 给某浮窗种入示例变量（A1-A4 + B1-B4）。`demo_values = true` 时带示范数值。
+    pub fn seed_example_variables(&self, overlay_id: i64, demo_values: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        insert_seed_vars(&conn, overlay_id, now_ms(), demo_values)
     }
 
     /// 更早版本（JSON 文件存储）的一次性导入：成功返回 true。
@@ -442,20 +456,8 @@ impl Store {
             params![DEFAULT_TEMPLATE, now],
         )
         .map_err(|e| e.to_string())?;
-        let seed_vars = [
-            ("A1", "人机场次", 6.0),
-            ("A2", "真人场次", 2.0),
-            ("A3", "人机胜场", 6.0),
-            ("A4", "真人胜场", 1.0),
-        ];
-        for (i, (key, name, value)) in seed_vars.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (1, ?1, ?2, ?3, 1, ?4)",
-                params![key, name, value, now + i as i64],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        insert_seed_computed(&conn, 1, now)?;
+        // 示范数值（6/2/6/1），方便第一次打开就看到效果
+        insert_seed_vars(&conn, 1, now, true)?;
         Ok(())
     }
 
@@ -848,6 +850,31 @@ impl Store {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// 给某浮窗补一套示范变量：A1-A4（人机/真人 场次与胜场）+ B1-B4 计算变量。
+/// `demo_values = true` 时填入示范数值 6/2/6/1，否则全部从 0 开始。
+fn insert_seed_vars(
+    conn: &Connection,
+    overlay_id: i64,
+    now: i64,
+    demo_values: bool,
+) -> Result<(), String> {
+    let v = |demo: f64| if demo_values { demo } else { 0.0 };
+    let vars = [
+        ("A1", "人机场次", v(6.0)),
+        ("A2", "真人场次", v(2.0)),
+        ("A3", "人机胜场", v(6.0)),
+        ("A4", "真人胜场", v(1.0)),
+    ];
+    for (i, (key, name, value)) in vars.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            params![overlay_id, key, name, value, now + i as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    insert_seed_computed(conn, overlay_id, now)
 }
 
 /// 给某浮窗补一套种子计算变量（B1-B4，对应"战绩"场景）。

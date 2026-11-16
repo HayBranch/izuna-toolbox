@@ -78,6 +78,19 @@ pub fn run() {
                         }
                     }
                 }
+                // 主窗口焦点变化：重应用所有浮窗状态（主窗口在前台时浮窗临时取消置顶，
+                // 避免透明浮窗压住主窗口拦截点击；失焦后恢复置顶）
+                tauri::WindowEvent::Focused(_) => {
+                    if window.label() == "main" {
+                        let app = window.app_handle();
+                        let store = app.state::<Arc<Store>>();
+                        for cfg in store.get().overlays {
+                            if let Some(w) = app.get_webview_window(&overlay_win::overlay_label(cfg.id)) {
+                                let _ = overlay_win::apply_window_state(app, &w, &cfg, false);
+                            }
+                        }
+                    }
+                }
                 // 拖动浮窗：回写位置到数据库；同时节流广播给主窗口刷新坐标输入框
                 tauri::WindowEvent::Moved(position) => {
                     if let Some(id) = overlay_win::id_from_label(window.label()) {
@@ -121,7 +134,8 @@ pub fn run() {
             commands::set_overlay_always_top,
             commands::set_overlay_click_through,
             commands::delete_overlay,
-            commands::set_overlay_size
+            commands::set_overlay_size,
+            commands::open_url
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");
