@@ -1,0 +1,10 @@
+# 前端
+node_modules
+dist
+
+# Rust
+src-tauri/target
+src-tauri/Cargo.lock.orig
+
+# Tauri 自动生成的权限 schema
+src-tauri/gen/schemas

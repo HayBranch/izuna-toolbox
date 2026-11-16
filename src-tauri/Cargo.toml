@@ -1,0 +1,30 @@
+[package]
+name = "izuna-toolbox"
+version = "0.1.0"
+description = "泉奈工具箱：OBS 可捕获的悬浮字幕桌面工具"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+# 库形式组织逻辑，main.rs 只做入口；`staticlib`/`cdylib` 为将来编译移动端留口
+name = "izuna_toolbox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 刻意保持依赖最小化（体积优先）：
+# - 不用 sysinfo / dialog / opener 等插件，只保留托盘需要的 tray-icon 特性；
+# - rusqlite 的 `bundled` 特性把 SQLite 源码静态编译进程序，用户无需安装。
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

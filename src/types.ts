@@ -1,0 +1,72 @@
+/** 与 src-tauri 中 Rust 结构体一一对应（serde camelCase） */
+
+/** 用户自定义变量（手动维护数值的"框框"）：key 用于模板/表达式引用，如 A1 */
+export interface UserVar {
+  id: number;
+  key: string;
+  /** 界面显示名，如"人机场次" */
+  name: string;
+  value: number;
+  /** 每按一次 −/＋ 增减多少 */
+  step: number;
+  /** 毫秒时间戳 */
+  createdAt: number;
+}
+
+/** 计算变量：表达式对其它变量求值，只读 */
+export interface ComputedVar {
+  id: number;
+  key: string;
+  name: string;
+  /** 如 `A1 + A2`、`A4 / (A1 + A2)` */
+  expr: string;
+  /** plain 普通数 | percent 百分比（0.8 → "80%"） */
+  format: "plain" | "percent";
+  /** 小数点位数 0-6 */
+  decimals: number;
+  createdAt: number;
+}
+
+/** 单个悬浮字幕浮窗的配置 */
+export interface OverlayConfig {
+  id: number;
+  name: string;
+  /** 模板文本，{today} {A1} 这类占位符渲染时替换 */
+  template: string;
+  /** 是否显示（隐藏 ≠ 删除） */
+  shown: boolean;
+  /** 窗口置顶 */
+  alwaysOnTop: boolean;
+  /** 鼠标穿透：开启后浮窗不接收鼠标事件，不影响游戏操作 */
+  clickThrough: boolean;
+  /** 窗口位置（物理像素，拖动浮窗自动回写） */
+  x: number;
+  y: number;
+  fontSize: number;
+  /** #RRGGBB */
+  fontColor: string;
+  bold: boolean;
+  /** 深色描边阴影，直播画面上更易读 */
+  shadow: boolean;
+  /** #RRGGBB */
+  bgColor: string;
+  /** 背景不透明度 0-100 */
+  bgOpacity: number;
+  /** 创建时间（毫秒时间戳） */
+  createdAt: number;
+}
+
+/** 全量配置（Rust 侧 SQLite） */
+export interface AppConfig {
+  account: string;
+  variables: UserVar[];
+  computed: ComputedVar[];
+  overlays: OverlayConfig[];
+}
+
+/** 拖动浮窗时 Rust 发出的 overlay-moved 事件负载 */
+export interface MovedEvent {
+  id: number;
+  x: number;
+  y: number;
+}

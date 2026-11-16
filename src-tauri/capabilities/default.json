@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口与悬浮字幕浮窗的能力：核心 API + 浮窗拖拽（data-tauri-drag-region 需要 start-dragging 权限）",
+  "windows": ["main", "overlay-*"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif;
+  @apply select-none bg-slate-950 text-slate-200 antialiased;
+}
+
+/* 悬浮字幕浮窗模式：页面背景必须完全透明，才能透出桌面/游戏画面 */
+html.overlay-mode,
+html.overlay-mode body {
+  height: auto;
+  background: transparent !important;
+  overflow: hidden;
+}
+html.overlay-mode #root {
+  height: auto;
+}
+html.overlay-mode ::-webkit-scrollbar {
+  display: none;
+}
+
+/* 细滚动条，桌面应用观感 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-slate-700;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-600;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

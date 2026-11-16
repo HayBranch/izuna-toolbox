@@ -1,0 +1,31 @@
+{
+  "name": "izuna-toolbox",
+  "private": true,
+  "version": "0.1.0",
+  "description": "泉奈工具箱 —— 带 OBS 可捕获悬浮字幕的轻量 Tauri 桌面工具",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "icon": "node scripts/gen-icon.mjs && tauri icon scripts/app-icon.png",
+    "bundle": "tauri build --bundles nsis"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "tailwindcss": "^4",
+    "typescript": "^5.6",
+    "vite": "^7"
+  }
+}
