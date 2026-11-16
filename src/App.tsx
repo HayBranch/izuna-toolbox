@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getConfig } from "./api";
 import type { AppConfig, MovedEvent } from "./types";
@@ -36,18 +37,19 @@ const TABS: { id: TabId; label: string; icon: string; desc: string }[] = [
     id: "vars",
     label: "变量与计数",
     icon: "🧮",
-    desc: "自定义任意变量并加减计数，用表达式自动算出总数、胜率等（SQLite 持久化）",
+    desc: "每套浮窗都有自己独立的变量：自定义任意变量并加减计数，表达式自动算总数、胜率（SQLite 持久化）",
   },
   {
     id: "overlays",
     label: "悬浮字幕",
     icon: "🪟",
-    desc: "浮窗配置队列：可创建多个、独立命名，模板变量、样式、置顶与鼠标穿透",
+    desc: "浮窗配置队列：可创建多套、各自命名，模板变量、样式、置顶与鼠标穿透",
   },
 ];
 
 function MainShell() {
   const [tab, setTab] = useState<TabId>("vars");
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const active = TABS.find((t) => t.id === tab)!;
 
@@ -120,12 +122,20 @@ function MainShell() {
           ))}
         </nav>
 
-        <footer className="px-5 pb-5 text-xs leading-5 text-slate-600">
-          关闭窗口不会退出，
-          <br />
-          会最小化到系统托盘 🫥
-          <br />
-          浮窗继续悬浮，可被直播软件捕获。
+        <footer className="space-y-3 px-5 pb-5 text-xs leading-5 text-slate-600">
+          <p>
+            关闭窗口不会退出，
+            <br />
+            会最小化到系统托盘 🫥
+            <br />
+            浮窗继续悬浮，可被直播软件捕获。
+          </p>
+          <button
+            onClick={() => setAboutOpen(true)}
+            className="rounded-lg border border-slate-800 px-2.5 py-1 text-xs text-slate-500 transition hover:border-slate-600 hover:text-slate-300"
+          >
+            ℹ️ 关于
+          </button>
         </footer>
       </aside>
 
@@ -144,6 +154,65 @@ function MainShell() {
           <OverlaysPage config={config} />
         )}
       </main>
+
+      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
+    </div>
+  );
+}
+
+/** 「关于」弹窗：应用介绍、版本、仓库与开源协议 */
+function AboutDialog({ onClose }: { onClose: () => void }) {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion("0.1.0"));
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-4">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-400 to-indigo-500 text-2xl shadow-lg shadow-indigo-500/30">
+            🥷
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-slate-100">泉奈工具箱</h3>
+            <p className="text-xs text-slate-500">Izuna Toolbox{version ? ` · v${version}` : ""}</p>
+          </div>
+        </div>
+
+        <p className="mt-4 text-sm leading-6 text-slate-400">
+          为直播玩家打造的本地小工具：把战绩数据做成一枚可被 OBS
+          等直播软件捕获的悬浮字幕浮窗。支持多套浮窗（各自独立的变量与模板）、
+          自定义变量与表达式计算、百分比格式化；数据全部保存在本地 SQLite，不联网、不上传。
+        </p>
+
+        <div className="mt-4 space-y-1.5 rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-xs leading-5">
+          <p className="text-slate-500">
+            仓库：<span className="font-mono text-slate-400">https://gitee.com/HayBranch/izuna-toolbox</span>
+          </p>
+          <p className="text-slate-500">
+            协议：<span className="text-slate-400">MIT License</span>
+          </p>
+          <p className="text-slate-500">
+            版权：<span className="text-slate-400">Copyright © 2026 HayBranch</span>
+          </p>
+        </div>
+
+        <button
+          onClick={onClose}
+          className="mt-5 w-full rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
+        >
+          关闭
+        </button>
+      </div>
     </div>
   );
 }

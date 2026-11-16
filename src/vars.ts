@@ -1,12 +1,12 @@
 /**
- * 模板变量引擎：
- * - 内置变量（today/date/time/account）+ 用户变量（A1…）+ 计算变量（B1…）；
+ * 模板变量引擎（每个浮窗一套，互不影响）：
+ * - 内置变量（today/date/time/account）+ 本套用户变量（A1…）+ 本套计算变量（B1…）；
  * - 表达式求值：支持 `+ - * /`、括号、一元负号、数字与变量名，
  *   例如 `A1 + A2`、`(A3 + A4) / (A1 + A2)`；
  * - 格式化：普通数 / 百分比（0.8 → "80%"），小数位数可控制；
  * - tokenize：模板 → 片段数组，未知写法原样显示。
  */
-import type { AppConfig } from "./types";
+import type { OverlayConfig } from "./types";
 
 export type Vars = Record<string, string>;
 
@@ -130,7 +130,7 @@ export function fmtPercent(v: number, decimals: number): string {
   return `${fmtNum(v * 100, decimals)}%`;
 }
 
-// ---------- 全量变量表 ----------
+// ---------- 全量变量表（某一套浮窗的） ----------
 
 export interface VarDef {
   key: string;
@@ -144,29 +144,33 @@ function builtinDefs(): VarDef[] {
     { key: "today", label: "今日日期" },
     { key: "date", label: "日期" },
     { key: "time", label: "时间" },
-    { key: "account", label: "账号" },
+    { key: "account", label: "本套账号" },
   ];
 }
 
-/** 变量芯片列表（用于模板编辑器"点击插入"） */
-export function varDefs(config: AppConfig): VarDef[] {
+/** 变量芯片列表（用于模板编辑器"点击插入"），来源 = 这一套浮窗自己的变量 */
+export function varDefs(overlay: OverlayConfig): VarDef[] {
   return [
     ...builtinDefs(),
-    ...config.variables.map((v) => ({ key: v.key, label: v.name })),
-    ...config.computed.map((c) => ({ key: c.key, label: `${c.name} = ${c.expr}`, computed: true })),
+    ...overlay.variables.map((v) => ({ key: v.key, label: v.name })),
+    ...overlay.computed.map((c) => ({
+      key: c.key,
+      label: `${c.name} = ${c.expr}`,
+      computed: true,
+    })),
   ];
 }
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /**
- * 构建数值求值的 lookup：原始变量直接取值；计算变量惰性求值 + 循环检测。
+ * 构建数值求值的 lookup：本套原始变量直接取值；计算变量惰性求值 + 循环检测。
  * computeVars 和界面上的实时预览共用。
  */
-export function makeLookup(config: AppConfig): Lookup {
+export function makeLookup(overlay: OverlayConfig): Lookup {
   const scope: Record<string, number> = {};
-  for (const v of config.variables) scope[v.key] = v.value;
-  const defs = new Map(config.computed.map((c) => [c.key, c]));
+  for (const v of overlay.variables) scope[v.key] = v.value;
+  const defs = new Map(overlay.computed.map((c) => [c.key, c]));
   const memo = new Map<string, number | null>();
   const evaluating = new Set<string>();
 
@@ -185,24 +189,24 @@ export function makeLookup(config: AppConfig): Lookup {
 }
 
 /**
- * 把配置 + 当前时间算成 `Record<变量名, 显示字符串>`。
+ * 把一套浮窗配置 + 当前时间算成 `Record<变量名, 显示字符串>`。
  * 计算变量可以引用其它计算变量（循环引用求值为 "—"）。
  */
-export function computeVars(config: AppConfig, now: Date): Vars {
+export function computeVars(overlay: OverlayConfig, now: Date): Vars {
   const y = now.getFullYear();
   const m = pad2(now.getMonth() + 1);
   const d = pad2(now.getDate());
 
-  const lookup = makeLookup(config);
+  const lookup = makeLookup(overlay);
 
   const out: Vars = {
     today: `${y}${m}${d}`,
     date: `${y}-${m}-${d}`,
     time: `${pad2(now.getHours())}:${pad2(now.getMinutes())}`,
-    account: config.account || "未设置",
+    account: overlay.account || "未设置",
   };
-  for (const v of config.variables) out[v.key] = fmtNum(v.value, -1);
-  for (const c of config.computed) {
+  for (const v of overlay.variables) out[v.key] = fmtNum(v.value, -1);
+  for (const c of overlay.computed) {
     const val = lookup(c.key);
     out[c.key] =
       val === null ? "—" : c.format === "percent" ? fmtPercent(val, c.decimals) : fmtNum(val, c.decimals);

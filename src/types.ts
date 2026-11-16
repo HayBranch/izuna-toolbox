@@ -1,6 +1,7 @@
 /** 与 src-tauri 中 Rust 结构体一一对应（serde camelCase） */
 
-/** 用户自定义变量（手动维护数值的"框框"）：key 用于模板/表达式引用，如 A1 */
+/** 用户自定义变量（手动维护数值的"框框"）：key 用于模板/表达式引用，如 A1。
+ *  属于某一浮窗（一套配置），只在该浮窗内有效。 */
 export interface UserVar {
   id: number;
   key: string;
@@ -13,7 +14,7 @@ export interface UserVar {
   createdAt: number;
 }
 
-/** 计算变量：表达式对其它变量求值，只读 */
+/** 计算变量：表达式对同一浮窗内的其它变量求值，只读 */
 export interface ComputedVar {
   id: number;
   key: string;
@@ -27,10 +28,12 @@ export interface ComputedVar {
   createdAt: number;
 }
 
-/** 单个悬浮字幕浮窗的配置 */
+/** 单个浮窗配置 = 一套完全独立的数据：自己的账号、变量、模板与样式 */
 export interface OverlayConfig {
   id: number;
   name: string;
+  /** 本套浮窗自己的账号（模板 {account}） */
+  account: string;
   /** 模板文本，{today} {A1} 这类占位符渲染时替换 */
   template: string;
   /** 是否显示（隐藏 ≠ 删除） */
@@ -54,13 +57,14 @@ export interface OverlayConfig {
   bgOpacity: number;
   /** 创建时间（毫秒时间戳） */
   createdAt: number;
+  /** 本套自己的自定义变量 */
+  variables: UserVar[];
+  /** 本套自己的计算变量 */
+  computed: ComputedVar[];
 }
 
-/** 全量配置（Rust 侧 SQLite） */
+/** 全量配置（Rust 侧 SQLite）：浮窗（套）列表 */
 export interface AppConfig {
-  account: string;
-  variables: UserVar[];
-  computed: ComputedVar[];
   overlays: OverlayConfig[];
 }
 

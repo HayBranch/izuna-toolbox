@@ -7,10 +7,16 @@
 //! - `skip_taskbar(true)` 只影响任务栏图标，不影响捕获；
 //! - 鼠标穿透（`set_ignore_cursor_events`）只改变鼠标事件的去向，不改变画面。
 
+use std::collections::HashSet;
+use std::sync::Mutex;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::store::OverlayConfig;
+
+/// 已量好内容尺寸的浮窗 id 集合（运行时状态，见 `apply_window_state` 的显示门槛）。
+pub struct MeasuredSet(pub Mutex<HashSet<i64>>);
 
 /// 浮窗窗口 label：`overlay-{id}`，与 capabilities 里的 `overlay-*` 对应。
 pub const LABEL_PREFIX: &str = "overlay-";
@@ -57,6 +63,7 @@ pub fn create_overlay_window(app: &AppHandle, cfg: &OverlayConfig) -> Result<(),
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(format!("泉奈浮窗 · {}", cfg.name))
         .visible(false) // 先隐藏，防止加载时闪烁
+        .inner_size(160.0, 44.0) // 极小起步：显示门槛由"量好尺寸"把关（见下）
         .decorations(false) // 无边框
         .transparent(true) // 背景透明，圆角/半透明背景由页面 CSS 画出
         .shadow(false) // 关键：透明窗口必须关阴影，否则直播捕获会有黑边
@@ -68,13 +75,32 @@ pub fn create_overlay_window(app: &AppHandle, cfg: &OverlayConfig) -> Result<(),
         .build()
         .map_err(|e| format!("创建浮窗失败：{e}"))?;
 
-    apply_window_state(&window, cfg, true)
+    apply_window_state(app, &window, cfg, true)
+}
+
+/// 透明浮窗的显示门槛：**没量好内容尺寸的浮窗绝不允许显示**。
+/// 原因：透明窗口的整块矩形（包括看不见的部分）都会拦截鼠标点击，
+/// 若用默认大小（800x600 级别）提前显示，会像一块玻璃盖住主窗口，
+/// 用户表现为"主窗口点什么都没反应"。
+pub fn mark_measured(app: &AppHandle, id: i64) {
+    if let Some(set) = app.try_state::<MeasuredSet>() {
+        if let Ok(mut m) = set.0.lock() {
+            m.insert(id);
+        }
+    }
+}
+
+fn is_measured(app: &AppHandle, id: i64) -> bool {
+    app.try_state::<MeasuredSet>()
+        .map(|s| s.0.lock().map(|m| m.contains(&id)).unwrap_or(false))
+        .unwrap_or(false)
 }
 
 /// 把配置同步到浮窗窗口状态（置顶 / 鼠标穿透 / 位置 / 显隐）。
 /// `apply_position = false` 时跳过移动，用于"样式微调"命令，
 /// 防止主窗口表单里过期的坐标把用户刚拖好的位置弹回去。
 pub fn apply_window_state(
+    app: &AppHandle,
     window: &WebviewWindow,
     cfg: &OverlayConfig,
     apply_position: bool,
@@ -90,9 +116,12 @@ pub fn apply_window_state(
             .set_position(PhysicalPosition::new(cfg.x, cfg.y))
             .map_err(warn("设置浮窗位置失败"))?;
     }
-    // show() 不会抢焦点（区别于 set_focus），适合直播场景
+    // show() 不会抢焦点（区别于 set_focus），适合直播场景；
+    // 但只在量好尺寸后才 show，未量好之前保持隐藏
     if cfg.shown {
-        window.show().map_err(warn("显示浮窗失败"))?;
+        if is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
+            window.show().map_err(warn("显示浮窗失败"))?;
+        }
     } else {
         window.hide().map_err(warn("隐藏浮窗失败"))?;
     }
@@ -107,7 +136,7 @@ pub fn sync_overlay_window(
 ) -> Result<WebviewWindow, String> {
     let label = overlay_label(cfg.id);
     if let Some(window) = app.get_webview_window(&label) {
-        apply_window_state(&window, cfg, apply_position)?;
+        apply_window_state(app, &window, cfg, apply_position)?;
         Ok(window)
     } else {
         create_overlay_window(app, cfg)?;

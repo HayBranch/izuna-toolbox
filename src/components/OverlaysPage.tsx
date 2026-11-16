@@ -1,9 +1,10 @@
 /**
- * 悬浮字幕管理页：每个浮窗一张配置卡。
+ * 悬浮字幕管理页：每个浮窗一张配置卡，每套浮窗完全独立
+ * （各自的账号、变量、计算变量、模板与样式）。
  *
  * 每个浮窗可独立配置：
  * - 显示/隐藏、窗口置顶、鼠标穿透（浮窗自身悬停也有工具条）
- * - 模板文本（点变量芯片插入 {变量}；内置 today/account，自定义 A1…，计算 B1…）
+ * - 模板文本（点变量芯片插入 {变量}；内置 today/account，本套自定义 A1…，计算 B1…）
  * - 字号 / 字色 / 加粗 / 描边阴影 / 背景色 / 背景不透明度
  * - 位置 X/Y（也可以直接拖浮窗，拖完自动保存）
  *
@@ -18,15 +19,12 @@ import { formatDateTime } from "../utils";
 import SubtitleView from "./SubtitleView";
 
 export default function OverlaysPage({ config }: { config: AppConfig }) {
-  const vars = computeVars(config, new Date());
-  const defs = varDefs(config);
-
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm leading-6 text-slate-500">
           浮窗是无边框透明小窗，可被 OBS 等直播软件「窗口捕获」；拖动浮窗自动保存位置。
-          开启「鼠标穿透」后浮窗不再响应鼠标，回这里解锁。
+          开启「鼠标穿透」后浮窗不再响应鼠标，回这里解锁。每套浮窗的变量相互独立，在「变量与计数」页选择套编辑。
         </p>
         <button
           onClick={() => addOverlay().catch(console.warn)}
@@ -37,7 +35,7 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
       </div>
 
       {config.overlays.map((overlay) => (
-        <OverlayEditor key={overlay.id} overlay={overlay} vars={vars} defs={defs} />
+        <OverlayEditor key={overlay.id} overlay={overlay} />
       ))}
 
       {config.overlays.length === 0 && (
@@ -49,15 +47,11 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
   );
 }
 
-function OverlayEditor({
-  overlay,
-  vars,
-  defs,
-}: {
-  overlay: OverlayConfig;
-  vars: ReturnType<typeof computeVars>;
-  defs: ReturnType<typeof varDefs>;
-}) {
+function OverlayEditor({ overlay }: { overlay: OverlayConfig }) {
+  // 本套浮窗自己的变量：模板芯片与预览都用它
+  const vars = computeVars(overlay, new Date());
+  const defs = varDefs(overlay);
+
   const [draft, setDraft] = useState(overlay);
   const editingText = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);

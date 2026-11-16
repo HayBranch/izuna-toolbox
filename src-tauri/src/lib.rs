@@ -29,14 +29,19 @@ pub fn run() {
 
             let store = Arc::new(Store::new(data_dir.join("izuna-toolbox.db"))?);
 
-            // 2. 为已有配置的浮窗创建窗口（保持隐藏，等浮窗页面量好尺寸再显示）
+            // 2. 浮窗"已量尺寸"集合要先于浮窗创建注册（显示门槛依赖它）
+            app.manage(overlay_win::MeasuredSet(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )));
+
+            // 3. 为已有配置的浮窗创建窗口（保持隐藏，等浮窗页面量好尺寸再显示）
             for cfg in store.get().overlays {
                 if let Err(e) = overlay_win::create_overlay_window(app.handle(), &cfg) {
                     eprintln!("启动浮窗 #{} 失败：{e}", cfg.id);
                 }
             }
 
-            // 3. 托盘 + 拖动事件节流时间戳
+            // 4. 托盘 + 拖动事件节流时间戳
             app.manage(std::sync::Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(1),
             ));
@@ -47,23 +52,29 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
-                // 关闭主窗口 = 隐藏到托盘；关闭浮窗（如 Alt+F4）= 等价"隐藏"。
+                // 关闭主窗口 = 隐藏到托盘；关闭仍存在的浮窗（如 Alt+F4）= 等价"隐藏"；
+                // 已被删除的浮窗窗口不拦截，让删除流程能真正关掉窗口。
                 // 都不真正退出进程，托盘菜单"退出程序"才退出。
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
                     if window.label() == "main" {
+                        api.prevent_close();
                         let _ = window.hide();
                     } else if let Some(id) = overlay_win::id_from_label(window.label()) {
                         let app = window.app_handle();
                         let store = app.state::<Arc<Store>>();
-                        if store.set_flag(id, |o| o.shown = false).is_ok() {
-                            if let Some(cfg) =
-                                store.get().overlays.into_iter().find(|o| o.id == id)
-                            {
-                                let _ = overlay_win::sync_overlay_window(app, &cfg, false);
+                        let exists = store.get().overlays.iter().any(|o| o.id == id);
+                        if exists {
+                            api.prevent_close();
+                            if store.set_flag(id, |o| o.shown = false).is_ok() {
+                                if let Some(cfg) =
+                                    store.get().overlays.into_iter().find(|o| o.id == id)
+                                {
+                                    let _ =
+                                        overlay_win::sync_overlay_window(app, &cfg, false);
+                                }
+                                use tauri::Emitter;
+                                let _ = app.emit(commands::CONFIG_CHANGED_EVENT, &store.get());
                             }
-                            use tauri::Emitter;
-                            let _ = app.emit(commands::CONFIG_CHANGED_EVENT, &store.get());
                         }
                     }
                 }

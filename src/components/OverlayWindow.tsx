@@ -87,10 +87,11 @@ export default function OverlayWindow() {
     return () => ro.disconnect();
   }, [config !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const vars = useMemo(
-    () => (config ? computeVars(config, new Date()) : {}),
-    [config, tick],
-  );
+  // 本套浮窗自己的变量（tick 用于 30s 刷新时间类变量）；在 early return 之前求，保证 hooks 顺序稳定
+  const vars = useMemo(() => {
+    const own = config?.overlays.find((o) => o.id === id);
+    return own ? computeVars(own, new Date()) : {};
+  }, [config, tick, id]);
 
   if (!config) return null;
   const cfg = config.overlays.find((o) => o.id === id);
