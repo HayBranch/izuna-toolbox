@@ -58,7 +58,11 @@ pub fn get_config(store: State<'_, Arc<Store>>) -> Config {
 // ---------- 浮窗（套） ----------
 
 /// 新建浮窗：生成配置（默认位置 = 主显示器顶部居中）→ 落库 → 种入示例变量 → 建窗广播。
-#[tauri::command]
+///
+/// `#[tauri::command(async)]` 很关键：同步命令会占用主线程，而创建 WebviewWindow
+/// 又需要主线程的事件循环。两者相撞时命令永远不返回、新窗口停在 about:blank，
+/// 表现就是「删除所有浮窗后再添加没反应」。
+#[tauri::command(async)]
 pub fn add_overlay(
     app: AppHandle,
     window: WebviewWindow,
@@ -83,7 +87,7 @@ pub fn add_overlay(
 }
 
 /// 更新浮窗的名称/账号/模板/样式（不动位置；位置走 move_overlay 或拖动回写）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_overlay(
     app: AppHandle,
     window: WebviewWindow,
@@ -97,7 +101,7 @@ pub fn update_overlay(
 }
 
 /// 主窗口直接修改浮窗位置（X/Y 输入框），立即生效。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_overlay(
     app: AppHandle,
     window: WebviewWindow,
@@ -154,7 +158,7 @@ pub fn set_overlay_size(
 
 // 下面三个开关命令独立出来：浮窗自身的悬停小工具条和主窗口的开关都只改一个布尔值。
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_overlay_shown(
     app: AppHandle,
     window: WebviewWindow,
@@ -165,7 +169,7 @@ pub fn set_overlay_shown(
     set_flag_command(&app, &window, &store, id, |o| o.shown = value)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_overlay_always_top(
     app: AppHandle,
     window: WebviewWindow,
@@ -176,7 +180,7 @@ pub fn set_overlay_always_top(
     set_flag_command(&app, &window, &store, id, |o| o.always_on_top = value)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_overlay_click_through(
     app: AppHandle,
     window: WebviewWindow,
@@ -201,7 +205,7 @@ fn set_flag_command(
 
 /// 删除浮窗：连同它那套变量一起删；窗口真正关闭
 /// （CloseRequested 只拦截"仍存在于数据库"的浮窗，见 lib.rs）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_overlay(
     app: AppHandle,
     window: WebviewWindow,
@@ -217,23 +221,8 @@ pub fn delete_overlay(
 }
 
 // ---------- 套内变量 ----------
-
-#[tauri::command]
-pub fn set_account(
-    app: AppHandle,
-    window: WebviewWindow,
-    overlay_id: i64,
-    account: String,
-    store: State<'_, Arc<Store>>,
-) -> Result<Config, String> {
-    require_main(&window)?;
-    if !store.overlay_exists(overlay_id) {
-        return Err(format!("浮窗 #{overlay_id} 不存在"));
-    }
-    // 账号只是浮窗的一个字段，走 update_overlay 的字段级更新
-    store.update_account(overlay_id, &account)?;
-    changed(&app, &store)
-}
+// （账号只是浮窗的一个字段，update_overlay / store.update_account 已覆盖，
+//  不再单独提供命令）
 
 #[tauri::command]
 pub fn add_variable(

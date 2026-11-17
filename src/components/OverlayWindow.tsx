@@ -21,7 +21,7 @@ import {
 } from "../api";
 import type { AppConfig } from "../types";
 import { computeVars } from "../vars";
-import SubtitleView, { SUBTITLE_PAD } from "./SubtitleView";
+import SubtitleView from "./SubtitleView";
 
 function parseId(): number {
   const label = getCurrentWindow().label; // overlay-{id}
@@ -33,9 +33,9 @@ export default function OverlayWindow() {
   const id = useMemo(parseId, []);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tick, setTick] = useState(0);
-  // 测量目标：文字内层元素。它的尺寸只由内容决定，不受窗口宽度约束，
-  // 模板再长也能量出真实宽度（窗口宽度由 Rust 侧夹到显示器范围内）。
-  const spanRef = useRef<HTMLSpanElement>(null);
+  // 测量目标：字幕外框（含内边距）。它用 width:max-content 按内容真实宽度排版，
+  // 不被当前窗口宽度反向约束；maxWidth 只在这里生效。
+  const boxRef = useRef<HTMLDivElement>(null);
   const applied = useRef({ w: 0, h: 0 });
 
   // 透明背景：浮窗页面的 html/body 不能有底色（见 index.css 的 .overlay-mode）
@@ -74,13 +74,16 @@ export default function OverlayWindow() {
     };
   }, [id]);
 
-  // 文字尺寸 + 内边距 → 窗口尺寸（带 1px 迟滞，避免 ResizeObserver ↔ set_size 抖动循环）
+  // 文字盒尺寸 → 窗口尺寸（带 1px 迟滞，避免 ResizeObserver ↔ set_size 抖动循环）。
+  // 测量的是**内容真实宽度**：SubtitleView 用 width:max-content + max-width，
+  // 不再受当前窗口宽度约束。若只按窗口内的折行结果测量，窗口会越量越窄，
+  // 表现为「最大宽度调大也没用」。
   useEffect(() => {
-    const el = spanRef.current;
+    const el = boxRef.current;
     if (!el) return;
     const measure = () => {
-      const w = Math.ceil(el.offsetWidth) + SUBTITLE_PAD.x * 2;
-      const h = Math.ceil(el.offsetHeight) + SUBTITLE_PAD.y * 2;
+      const w = Math.ceil(el.offsetWidth);
+      const h = Math.ceil(el.offsetHeight);
       if (Math.abs(w - applied.current.w) > 1 || Math.abs(h - applied.current.h) > 1) {
         applied.current = { w, h };
         setOverlaySize(w, h).catch(console.warn);
@@ -105,7 +108,7 @@ export default function OverlayWindow() {
 
   return (
     <div className="group relative">
-      <SubtitleView cfg={cfg} vars={vars} interactive={interactive} innerRef={spanRef} />
+      <SubtitleView cfg={cfg} vars={vars} interactive={interactive} boxRef={boxRef} />
 
       {interactive && (
         <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">

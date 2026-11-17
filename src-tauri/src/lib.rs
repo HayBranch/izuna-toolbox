@@ -59,6 +59,7 @@ pub fn run() {
                     if window.label() == "main" {
                         api.prevent_close();
                         let _ = window.hide();
+                        overlay_win::sync_all_overlay_windows(window.app_handle());
                     } else if let Some(id) = overlay_win::id_from_label(window.label()) {
                         let app = window.app_handle();
                         let store = app.state::<Arc<Store>>();
@@ -78,17 +79,11 @@ pub fn run() {
                         }
                     }
                 }
-                // 主窗口焦点变化：重应用所有浮窗状态（主窗口在前台时浮窗临时取消置顶，
-                // 避免透明浮窗压住主窗口拦截点击；失焦后恢复置顶）
+                // 主窗口焦点变化：重应用所有浮窗状态（主窗口聚焦时临时取消置顶，
+                // 失焦后恢复浮窗自己的置顶配置；不强制鼠标穿透，浮窗仍可拖动）。
                 tauri::WindowEvent::Focused(_) => {
                     if window.label() == "main" {
-                        let app = window.app_handle();
-                        let store = app.state::<Arc<Store>>();
-                        for cfg in store.get().overlays {
-                            if let Some(w) = app.get_webview_window(&overlay_win::overlay_label(cfg.id)) {
-                                let _ = overlay_win::apply_window_state(app, &w, &cfg, false);
-                            }
-                        }
+                        overlay_win::sync_all_overlay_windows(window.app_handle());
                     }
                 }
                 // 拖动浮窗：回写位置到数据库；同时节流广播给主窗口刷新坐标输入框
@@ -119,7 +114,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
-            commands::set_account,
             commands::add_variable,
             commands::update_variable,
             commands::step_variable,

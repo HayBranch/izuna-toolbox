@@ -68,10 +68,8 @@ export const deleteOverlay = (id: number) =>
 export const setOverlaySize = (width: number, height: number) =>
   invoke<void>("set_overlay_size", { width, height });
 
-// ---------- 套内：账号 / 自定义变量 / 计算变量 ----------
-
-export const setAccount = (overlayId: number, account: string) =>
-  cfged(invoke<AppConfig>("set_account", { overlayId, account }));
+// ---------- 套内：自定义变量 / 计算变量 ----------
+// （账号只是浮窗的一个字段，走 updateOverlay 整卡保存）
 
 /** key 传 null 让后端自动分配（A1、A2…） */
 export const addVariable = (overlayId: number, name: string, key: string | null, value: number, step: number) =>

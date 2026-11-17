@@ -55,6 +55,10 @@ export interface OverlayConfig {
   bgColor: string;
   /** 背景不透明度 0-100 */
   bgOpacity: number;
+  /** 自动换行：开启后长行按 maxWidth 折行（模板里的回车始终换行） */
+  wrap: boolean;
+  /** 自动换行最大宽度（逻辑像素） */
+  maxWidth: number;
   /** 创建时间（毫秒时间戳） */
   createdAt: number;
   /** 本套自己的自定义变量 */

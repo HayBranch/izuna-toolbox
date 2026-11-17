@@ -8,12 +8,12 @@
 //! - 鼠标穿透（`set_ignore_cursor_events`）只改变鼠标事件的去向，不改变画面。
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::store::OverlayConfig;
+use crate::store::{OverlayConfig, Store};
 
 /// 已量好内容尺寸的浮窗 id 集合（运行时状态，见 `apply_window_state` 的显示门槛）。
 pub struct MeasuredSet(pub Mutex<HashSet<i64>>);
@@ -105,9 +105,11 @@ pub fn apply_window_state(
     cfg: &OverlayConfig,
     apply_position: bool,
 ) -> Result<(), String> {
-    // 主窗口在前台时临时取消浮窗置顶：浮窗的矩形（含透明部分）会拦截鼠标，
-    // 常驻置顶的话会压在自家主窗口上，表现为"主窗口按钮点了没反应"。
+    // 主窗口在前台时临时取消浮窗置顶：非置顶的浮窗不会压住主窗口的按钮，
+    // 但仍可在主窗口没盖住的部分直接拖动（无需先隐藏主窗口）。
     // 主窗口失焦（回到游戏/桌面）后恢复配置里的置顶。
+    // 注意：不要因为"主窗口可见"就强制 set_ignore_cursor_events(true)，
+    // 那会让用户在主窗口开着时完全拖不动浮窗（表现为"有时候无法移动"）。
     let main_focused = app
         .get_webview_window("main")
         .and_then(|w| w.is_focused().ok())
@@ -149,6 +151,18 @@ pub fn sync_overlay_window(
         create_overlay_window(app, cfg)?;
         app.get_webview_window(&label)
             .ok_or_else(|| "创建浮窗后仍找不到窗口".into())
+    }
+}
+
+/// 主窗口显隐/焦点变化后，统一刷新全部浮窗的层级与鼠标穿透状态。
+pub fn sync_all_overlay_windows(app: &AppHandle) {
+    let store = app.state::<Arc<Store>>();
+    for cfg in store.get().overlays {
+        if let Some(window) = app.get_webview_window(&overlay_label(cfg.id)) {
+            if let Err(e) = apply_window_state(app, &window, &cfg, false) {
+                eprintln!("同步浮窗 #{} 失败：{e}", cfg.id);
+            }
+        }
     }
 }
 

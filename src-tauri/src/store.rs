@@ -82,6 +82,10 @@ pub struct OverlayConfig {
     pub bg_color: String,
     /// 背景不透明度 0-100（0 = 全透明）
     pub bg_opacity: u32,
+    /// 自动换行：开启后长行按 `max_width` 折行（模板里的回车始终换行）
+    pub wrap: bool,
+    /// 自动换行最大宽度（逻辑像素；<=0 表示不限制）
+    pub max_width: i64,
     /// 创建时间（毫秒时间戳）
     pub created_at: i64,
     /// 本套自己的自定义变量
@@ -97,8 +101,8 @@ pub struct Config {
     pub overlays: Vec<OverlayConfig>,
 }
 
-/// 默认模板：示范变量引用与计算变量的用法，可随意改。
-pub const DEFAULT_TEMPLATE: &str = "今日{today}，账号：{account}，总场次：{B1}，人机：{A1}，真人：{A2}，人机胜：{A3}，真人胜：{A4}，总胜率：{B3}，真实胜率：{B4}";
+/// 默认模板：多行排版示范变量引用与计算变量的用法，可随意改（`\n` 即换行）。
+pub const DEFAULT_TEMPLATE: &str = "今日{today} · 账号：{account}\n总场次：{B1}（人机 {A1}｜真人 {A2}）\n胜场：{B2}（人机 {A3}｜真人 {A4}）\n总胜率：{B3}｜真实胜率：{B4}";
 
 /// 旧版（第一版全局变量）的变量名 → 新名字。长的先替换，避免前缀误伤。
 fn rewrite_legacy_template(template: &str) -> String {
@@ -147,6 +151,8 @@ CREATE TABLE IF NOT EXISTS overlays (
     shadow         INTEGER NOT NULL DEFAULT 1,
     bg_color       TEXT NOT NULL DEFAULT '#0f172a',
     bg_opacity     INTEGER NOT NULL DEFAULT 55,
+    wrap           INTEGER NOT NULL DEFAULT 1,
+    max_width      INTEGER NOT NULL DEFAULT 460,
     created_at     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS variables (
@@ -175,8 +181,18 @@ CREATE INDEX IF NOT EXISTS idx_computed_overlay  ON computed(overlay_id);
 ";
 
 /// 旧版 SQLite 结构（v1：全局变量表、overlays 无 account 列）→ 当前结构。
-/// 返回是否发生了迁移。
+/// 返回是否发生了迁移。全新库（还没有 variables 表）直接跳过。
 fn migrate_v1(conn: &Connection) -> Result<bool, String> {
+    let has_variables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'variables'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has_variables == 0 {
+        return Ok(false); // 全新库，直接走 CREATE_SQL
+    }
     let has_overlay_id: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('variables') WHERE name = 'overlay_id'",
@@ -212,6 +228,25 @@ fn ensure_account_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// overlays 表补 wrap / max_width 列（换行显示，v2 → 当前）。
+/// 已有列则跳过（全新库由 CREATE_SQL 直接建出，迁移库走 ALTER）。
+fn ensure_wrap_columns(conn: &Connection) -> Result<(), String> {
+    let has_wrap: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('overlays') WHERE name = 'wrap'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("检查 wrap 列失败：{e}"))?;
+    if has_wrap == 0 {
+        conn.execute("ALTER TABLE overlays ADD COLUMN wrap INTEGER NOT NULL DEFAULT 1", [])
+            .map_err(|e| format!("补 wrap 列失败：{e}"))?;
+        conn.execute("ALTER TABLE overlays ADD COLUMN max_width INTEGER NOT NULL DEFAULT 460", [])
+            .map_err(|e| format!("补 max_width 列失败：{e}"))?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// 打开数据库、建表；首次使用时种入示例数据，并尝试从旧版数据迁移。
     pub fn new(db_path: PathBuf) -> Result<Self, String> {
@@ -220,9 +255,14 @@ impl Store {
         conn.execute_batch("PRAGMA journal_mode = WAL;")
             .map_err(|e| e.to_string())?;
 
-        ensure_account_column(&conn)?;
+        // 顺序很重要：先做"旧表改名"迁移（此时变量表还是 v1 结构），
+        // 再 CREATE 建出当前结构的表（IF NOT EXISTS 对已存在的旧表无操作，
+        // 被改名让位的 variables/computed 会在这里重建），最后补缺失的列。
+        // 直接建表 → 补列的顺序在全新库上会失败（表还不存在就 ALTER）。
         let was_v1 = migrate_v1(&conn)?;
         conn.execute_batch(CREATE_SQL).map_err(|e| format!("建表失败：{e}"))?;
+        ensure_account_column(&conn)?;
+        ensure_wrap_columns(&conn)?;
 
         let store = Self { conn: Mutex::new(conn) };
         if was_v1 {
@@ -473,7 +513,7 @@ impl Store {
         };
         let mut overlays = Vec::new();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, created_at FROM overlays ORDER BY id",
+            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at FROM overlays ORDER BY id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -498,7 +538,9 @@ impl Store {
                 shadow: row.get::<_, i64>(12)? != 0,
                 bg_color: row.get(13)?,
                 bg_opacity: row.get::<_, i64>(14)? as u32,
-                created_at: row.get(15)?,
+                wrap: row.get::<_, i64>(15)? != 0,
+                max_width: row.get(16)?,
+                created_at: row.get(17)?,
                 variables: vec![],
                 computed: vec![],
             })
@@ -537,14 +579,14 @@ impl Store {
     pub fn push_overlay(&self, cfg: &OverlayConfig) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 cfg.id, cfg.name, cfg.account, cfg.template,
                 cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
                 cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
                 cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-                cfg.created_at
+                cfg.wrap as i64, cfg.max_width, cfg.created_at
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -558,30 +600,16 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE overlays SET name = ?1, account = ?2, template = ?3, font_size = ?4, font_color = ?5, bold = ?6, shadow = ?7, bg_color = ?8, bg_opacity = ?9 WHERE id = ?10",
+                "UPDATE overlays SET name = ?1, account = ?2, template = ?3, font_size = ?4, font_color = ?5, bold = ?6, shadow = ?7, bg_color = ?8, bg_opacity = ?9, wrap = ?10, max_width = ?11 WHERE id = ?12",
                 params![
                     cfg.name, cfg.account.trim(), cfg.template, cfg.font_size as i64, cfg.font_color,
-                    cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64, cfg.id
+                    cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
+                    cfg.wrap as i64, cfg.max_width, cfg.id
                 ],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err(format!("浮窗 #{} 不存在", cfg.id));
-        }
-        Ok(())
-    }
-
-    /// 只更新某浮窗的账号字段（避免用整份草稿覆盖其它字段）。
-    pub fn update_account(&self, id: i64, account: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let changed = conn
-            .execute(
-                "UPDATE overlays SET account = ?1 WHERE id = ?2",
-                params![account.trim(), id],
-            )
-            .map_err(|e| e.to_string())?;
-        if changed == 0 {
-            return Err(format!("浮窗 #{id} 不存在"));
         }
         Ok(())
     }
@@ -715,6 +743,8 @@ impl Store {
         Ok(())
     }
 
+    /// 更新变量的名称/引用名/步长。数值只能由 step_variable 原子增减：
+    /// 若这里把编辑草稿里的旧 value 一起写回，防抖保存就可能抵消刚点的＋/−。
     pub fn update_variable(&self, overlay_id: i64, var: &UserVar) -> Result<(), String> {
         Self::validate_key(&var.key)?;
         let name = var.name.trim();
@@ -724,8 +754,8 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE variables SET key = ?1, name = ?2, value = ?3, step = ?4 WHERE id = ?5 AND overlay_id = ?6",
-                params![var.key, name, var.value, if var.step > 0.0 { var.step } else { 1.0 }, var.id, overlay_id],
+                "UPDATE variables SET key = ?1, name = ?2, step = ?3 WHERE id = ?4 AND overlay_id = ?5",
+                params![var.key, name, if var.step > 0.0 { var.step } else { 1.0 }, var.id, overlay_id],
             )
             .map_err(|e| {
                 if e.to_string().contains("UNIQUE") {
@@ -913,6 +943,8 @@ pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
         shadow: true,
         bg_color: "#0f172a".into(),
         bg_opacity: 55,
+        wrap: true,
+        max_width: 460,
         created_at,
         variables: vec![],
         computed: vec![],
