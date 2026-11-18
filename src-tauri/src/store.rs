@@ -7,15 +7,11 @@
 //! - `overlays`  浮窗（套）队列：可多个，含名字/创建时间等基本信息 + 每套自己的账号
 //! - `variables` 自定义变量，归属某个浮窗（overlay_id；follow_id 表示跟随本套哪个变量）
 //! - `computed`  计算变量，归属某个浮窗（overlay_id）
-//! - `meta`      杂项键值（保留；旧版全局账号迁移后不再使用）
-//!
-//! 旧库自动迁移：v1（全局变量、无 account 列）→ 当前结构；
-//! 更早的 config.json（JSON 存储）也会在首次启动时自动导入。
 //!
 //! 并发模型：`Connection` 非 `Sync`，用 `Mutex` 包一层挂进 Tauri 状态。
 //! 每次变更返回最新全量 `Config`，由命令层广播给所有窗口（单一数据源）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -107,21 +103,6 @@ pub struct Config {
 /// 默认模板：多行排版示范变量引用与计算变量的用法，可随意改（`\n` 即换行）。
 pub const DEFAULT_TEMPLATE: &str = "今日{today} · 账号：{account}\n总场次：{B1}（人机 {A1}｜真人 {A2}）\n胜场：{B2}（人机 {A3}｜真人 {A4}）\n总胜率：{B3}｜真实胜率：{B4}";
 
-/// 旧版（第一版全局变量）的变量名 → 新名字。长的先替换，避免前缀误伤。
-fn rewrite_legacy_template(template: &str) -> String {
-    template
-        .replace("{totalWinRatePct}", "{B3}")
-        .replace("{realWinRatePct}", "{B4}")
-        .replace("{totalWinRate}", "{B3}")
-        .replace("{realWinRate}", "{B4}")
-        .replace("{totalGames}", "{B1}")
-        .replace("{totalWins}", "{B2}")
-        .replace("{botGames}", "{A1}")
-        .replace("{realGames}", "{A2}")
-        .replace("{botWins}", "{A3}")
-        .replace("{realWins}", "{A4}")
-}
-
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -134,10 +115,6 @@ pub fn now_ms() -> i64 {
 }
 
 const CREATE_SQL: &str = "
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS overlays (
     id             INTEGER PRIMARY KEY,
     name           TEXT NOT NULL,
@@ -184,199 +161,25 @@ CREATE INDEX IF NOT EXISTS idx_variables_overlay ON variables(overlay_id);
 CREATE INDEX IF NOT EXISTS idx_computed_overlay  ON computed(overlay_id);
 ";
 
-/// 旧版 SQLite 结构（v1：全局变量表、overlays 无 account 列）→ 当前结构。
-/// 返回是否发生了迁移。全新库（还没有 variables 表）直接跳过。
-fn migrate_v1(conn: &Connection) -> Result<bool, String> {
-    let has_variables: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'variables'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if has_variables == 0 {
-        return Ok(false); // 全新库，直接走 CREATE_SQL
-    }
-    let has_overlay_id: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('variables') WHERE name = 'overlay_id'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if has_overlay_id > 0 {
-        return Ok(false); // 已是当前结构
-    }
-    // variables 表存在但缺 overlay_id → v1 结构。旧表改名让位。
-    conn.execute_batch(
-        "ALTER TABLE variables RENAME TO variables_legacy;
-         ALTER TABLE computed RENAME TO computed_legacy;",
-    )
-    .map_err(|e| format!("迁移旧表失败：{e}"))?;
-    Ok(true)
-}
-
-/// overlays 表补 account 列（v1 → 当前）。
-fn ensure_account_column(conn: &Connection) -> Result<(), String> {
-    let has_account: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('overlays') WHERE name = 'account'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if has_account == 0 {
-        conn.execute("ALTER TABLE overlays ADD COLUMN account TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| format!("补 account 列失败：{e}"))?;
-    }
-    Ok(())
-}
-
-/// overlays 表补 wrap / max_width 列（换行显示，v2 → 当前）。
-/// 已有列则跳过（全新库由 CREATE_SQL 直接建出，迁移库走 ALTER）。
-fn ensure_wrap_columns(conn: &Connection) -> Result<(), String> {
-    let has_wrap: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('overlays') WHERE name = 'wrap'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("检查 wrap 列失败：{e}"))?;
-    if has_wrap == 0 {
-        conn.execute("ALTER TABLE overlays ADD COLUMN wrap INTEGER NOT NULL DEFAULT 1", [])
-            .map_err(|e| format!("补 wrap 列失败：{e}"))?;
-        conn.execute("ALTER TABLE overlays ADD COLUMN max_width INTEGER NOT NULL DEFAULT 460", [])
-            .map_err(|e| format!("补 max_width 列失败：{e}"))?;
-    }
-    Ok(())
-}
-
-/// variables 表补 follow_id 列（联动，v3 → 当前）。
-/// 已有列则跳过（全新库由 CREATE_SQL 直接建出，迁移库走 ALTER）。
-fn ensure_follow_column(conn: &Connection) -> Result<(), String> {
-    let has_follow: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('variables') WHERE name = 'follow_id'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("检查 follow_id 列失败：{e}"))?;
-    if has_follow == 0 {
-        conn.execute(
-            "ALTER TABLE variables ADD COLUMN follow_id INTEGER NOT NULL DEFAULT 0",
-            [],
-        )
-        .map_err(|e| format!("补 follow_id 列失败：{e}"))?;
-    }
-    Ok(())
-}
-
 impl Store {
-    /// 打开数据库、建表；首次使用时种入示例数据，并尝试从旧版数据迁移。
+    /// 打开数据库、建表；首次使用时种入示例数据。
     pub fn new(db_path: PathBuf) -> Result<Self, String> {
         let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败：{e}"))?;
         // WAL：写入更快、读写不互斥，桌面应用常规配置
         conn.execute_batch("PRAGMA journal_mode = WAL;")
             .map_err(|e| e.to_string())?;
+        conn.execute_batch(CREATE_SQL)
+            .map_err(|e| format!("建表失败：{e}"))?;
 
-        // 顺序很重要：先做"旧表改名"迁移（此时变量表还是 v1 结构），
-        // 再 CREATE 建出当前结构的表（IF NOT EXISTS 对已存在的旧表无操作，
-        // 被改名让位的 variables/computed 会在这里重建），最后补缺失的列。
-        // 直接建表 → 补列的顺序在全新库上会失败（表还不存在就 ALTER）。
-        let was_v1 = migrate_v1(&conn)?;
-        conn.execute_batch(CREATE_SQL).map_err(|e| format!("建表失败：{e}"))?;
-        ensure_account_column(&conn)?;
-        ensure_wrap_columns(&conn)?;
-        ensure_follow_column(&conn)?;
-
-        let store = Self { conn: Mutex::new(conn) };
-        if was_v1 {
-            store.copy_v1_data()?;
-        } else {
-            store.import_legacy_json(&db_path)?;
-        }
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.repair_missing_computed()?;
         store.seed_if_fresh()?;
         Ok(store)
     }
 
-    /// v1 数据搬迁：全局变量挂到"第一个显示中的浮窗"（没有就建一个默认浮窗），
-    /// 旧模板里的旧变量名全部改写，旧全局账号写入每个浮窗。
-    fn copy_v1_data(&self) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let meta_account: String = conn
-            .query_row("SELECT value FROM meta WHERE key = 'account'", [], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-
-        // 变量与计算变量的归宿：第一个显示中的浮窗，否则 id 最小的浮窗
-        let target: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM overlays ORDER BY shown = 0, id LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let target = match target {
-            Some(id) => id,
-            None => {
-                conn.execute(
-                    "INSERT INTO overlays (name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, created_at)
-                     VALUES ('战绩浮窗', ?1, ?2, 1, 1, 0, 0, 40, 20, '#ffffff', 0, 1, '#0f172a', 55, ?3)",
-                    params![meta_account, DEFAULT_TEMPLATE, now_ms()],
-                )
-                .map_err(|e| e.to_string())?;
-                conn.last_insert_rowid()
-            }
-        };
-
-        conn.execute(
-            "INSERT INTO variables (id, overlay_id, key, name, value, step, created_at)
-             SELECT id, ?1, key, name, value, step, created_at FROM variables_legacy",
-            params![target],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO computed (id, overlay_id, key, name, expr, format, decimals, created_at)
-             SELECT id, ?1, key, name, expr, format, decimals, created_at FROM computed_legacy",
-            params![target],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute_batch("DROP TABLE variables_legacy; DROP TABLE computed_legacy;")
-            .map_err(|e| e.to_string())?;
-
-        // 旧全局账号 → 每个还没账号的浮窗；旧变量名 → 新变量名
-        conn.execute(
-            "UPDATE overlays SET account = ?1 WHERE account = ''",
-            params![meta_account],
-        )
-        .map_err(|e| e.to_string())?;
-        let ids: Vec<(i64, String)> = {
-            let mut stmt = conn
-                .prepare("SELECT id, template FROM overlays")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                .map_err(|e| e.to_string())?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-        for (id, template) in ids {
-            let rewritten = rewrite_legacy_template(&template);
-            if rewritten != template {
-                conn.execute(
-                    "UPDATE overlays SET template = ?1 WHERE id = ?2",
-                    params![rewritten, id],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        Ok(())
-    }
-
-    /// 修复：模板引用了变量但一套都没有（旧版迁移/删除变量后留下的空缺）→ 补种子。
+    /// 修复：模板引用了变量但一套都没有（比如删光了变量）→ 补种子。
     fn repair_missing_computed(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let ids: Vec<i64> = {
@@ -422,87 +225,6 @@ impl Store {
     pub fn seed_example_variables(&self, overlay_id: i64, demo_values: bool) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         insert_seed_vars(&conn, overlay_id, now_ms(), demo_values)
-    }
-
-    /// 更早版本（JSON 文件存储）的一次性导入：成功返回 true。
-    fn import_legacy_json(&self, db_path: &Path) -> Result<bool, String> {
-        let dir = match db_path.parent() {
-            Some(d) => d,
-            None => return Ok(false),
-        };
-        let legacy = dir.join("config.json");
-        let Ok(text) = std::fs::read_to_string(&legacy) else {
-            return Ok(false);
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return Ok(false);
-        };
-        let (Some(counters), Some(overlays)) = (v.get("counters"), v.get("overlays")) else {
-            return Ok(false);
-        };
-
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let now = now_ms();
-        let account = v.get("account").and_then(|x| x.as_str()).unwrap_or("");
-
-        // 变量
-        let seed = [
-            ("A1", "人机场次", "botGames"),
-            ("A2", "真人场次", "realGames"),
-            ("A3", "人机胜场", "botWins"),
-            ("A4", "真人胜场", "realWins"),
-        ];
-        for (i, (key, name, old_field)) in seed.iter().enumerate() {
-            let value = counters.get(*old_field).and_then(|x| x.as_f64()).unwrap_or(0.0);
-            conn.execute(
-                "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (0, ?1, ?2, ?3, 1, ?4)",
-                params![key, name, value, now + i as i64],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        // 浮窗（变量先挂 overlay_id = 0，落到第一个浮窗头上）
-        let mut first_id: Option<i64> = None;
-        for (i, o) in overlays.as_array().unwrap_or(&vec![]).iter().enumerate() {
-            let get_str = |f: &str| o.get(f).and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let get_bool = |f: &str| o.get(f).and_then(|x| x.as_bool()).unwrap_or(false);
-            let get_i64 = |f: &str| o.get(f).and_then(|x| x.as_i64()).unwrap_or(0);
-            conn.execute(
-                "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![
-                    get_i64("id").max((i + 1) as i64), get_str("name"), account,
-                    rewrite_legacy_template(&get_str("template")),
-                    get_bool("shown") as i64, get_bool("alwaysOnTop") as i64, get_bool("clickThrough") as i64,
-                    get_i64("x"), get_i64("y"), get_i64("fontSize"), get_str("fontColor"),
-                    get_bool("bold") as i64, get_bool("shadow") as i64, get_str("bgColor"), get_i64("bgOpacity"),
-                    now + i as i64
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            if first_id.is_none() {
-                first_id = Some(get_i64("id").max((i + 1) as i64));
-            }
-        }
-        let target = first_id.unwrap_or(0);
-        conn.execute(
-            "UPDATE variables SET overlay_id = ?1 WHERE overlay_id = 0",
-            params![target],
-        )
-        .map_err(|e| e.to_string())?;
-        // 模板引用了 B 变量就补一套种子计算变量
-        let refs_b: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM overlays WHERE id = ?1 AND template LIKE '%{B%'",
-                params![target],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if refs_b > 0 {
-            insert_seed_computed(&conn, target, now)?;
-        }
-        drop(conn);
-        let _ = std::fs::rename(&legacy, dir.join("config.json.migrated"));
-        Ok(true)
     }
 
     /// 全新数据库：种入一套示例浮窗（对应"战绩"场景）。
@@ -1260,40 +982,6 @@ mod tests {
         }
         assert_eq!(var(&store, "A3").value, 0.0);
         assert_eq!(var(&store, "A1").value, 0.0);
-        cleanup(store, dir);
-    }
-
-    #[test]
-    fn migration_adds_follow_column_without_losing_data() {
-        let dir = test_dir();
-        let db_path = dir.join("legacy.db");
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            // 模拟升级前的库：结构相同，但没有 follow_id 列
-            let old_sql = CREATE_SQL.replace("    follow_id   INTEGER NOT NULL DEFAULT 0,\n", "");
-            assert!(!old_sql.contains("follow_id"), "测试库应模拟没有 follow_id 的旧结构");
-            conn.execute_batch(&old_sql).unwrap();
-            conn.execute(
-                "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
-                 VALUES (1, '旧浮窗', '', '场次 {A1}', 1, 1, 0, 0, 0, 20, '#ffffff', 0, 1, '#0f172a', 55, 1, 460, ?1)",
-                params![now_ms()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (1, 'A1', '场次', 3, 1, ?1)",
-                params![now_ms()],
-            )
-            .unwrap();
-        }
-
-        let store = Store::new(db_path).unwrap();
-        let cfg = store.get();
-        assert_eq!(cfg.overlays.len(), 1);
-        assert_eq!(cfg.overlays[0].variables.len(), 1);
-        assert_eq!(cfg.overlays[0].variables[0].key, "A1");
-        assert_eq!(cfg.overlays[0].variables[0].value, 3.0);
-        assert_eq!(cfg.overlays[0].variables[0].follow_id, 0);
-
         cleanup(store, dir);
     }
 }

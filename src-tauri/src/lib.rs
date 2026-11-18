@@ -23,7 +23,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             // 1. 数据存储：SQLite 数据库放在应用数据目录（Windows: %APPDATA%/com.izuna.toolbox/）
-            //    首次运行建表并种入示例；发现旧版 config.json 会自动迁移数据。
+            //    首次运行建表并种入示例数据。
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
 

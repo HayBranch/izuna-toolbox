@@ -70,10 +70,8 @@
 - 数据保存在 `%APPDATA%/com.izuna.toolbox/izuna-toolbox.db`
   （SQLite，`rusqlite` bundled 静态编译，无需安装任何东西）；
 - 表结构：`overlays`（浮窗队列，含每套自己的账号）、
-  `variables` / `computed`（套内变量，按 `overlay_id` 归属）、`meta`（杂项）；
-- 每次变更即提交，退出无需保存；删除数据库文件即恢复出厂；
-- 旧版本（JSON 文件、以及全局变量的 v1 SQLite）会自动迁移：
-  旧变量名（{botGames} 等）改写为 {A1}…，缺失的计算变量自动补齐。
+  `variables` / `computed`（套内变量，按 `overlay_id` 归属）；
+- 每次变更即提交，退出无需保存；删除数据库文件即恢复出厂。
 
 ## 与体积有关的打包设计
 
@@ -121,7 +119,7 @@ src/
     └── SubtitleView.tsx      字幕渲染（主窗口预览与浮窗共用，所见即所得）
 src-tauri/src/
 ├── lib.rs                    应用装配：启动浮窗、窗口事件、命令注册
-├── store.rs                  SQLite 持久化（建表、示例种子、旧 JSON 迁移）
+├── store.rs                  SQLite 持久化（建表、示例种子）
 ├── commands.rs               全部 #[tauri::command]
 ├── overlay_win.rs            浮窗窗口生命周期（创建/置顶/穿透/位置/显隐）
 └── tray.rs                   系统托盘（关闭 = 最小化，托盘退出）
