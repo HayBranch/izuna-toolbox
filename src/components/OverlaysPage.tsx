@@ -5,7 +5,7 @@
  *
  * 卡片分区（从上到下）：
  * - 头部：名称 + 显示/置顶/鼠标穿透开关 + 删除
- * - 变量：自定义变量（−/＋ 计数）+ 计算变量（表达式），都是这一套自己的
+ * - 变量：自定义变量（−/＋ 计数，可设置跟随联动）+ 计算变量（表达式），都是这一套自己的
  * - 显示内容：账号 + 模板（回车即换行；点芯片插入变量；↵ 插入换行）
  * - 外观：字号/颜色/加粗/描边/背景 + 自动换行与最大宽度
  * - 预览：模拟直播画面（所见即所得）+ 位置 X/Y
@@ -261,7 +261,8 @@ function OverlayEditor({
 
           <div className="mt-3 flex items-center justify-between gap-2">
             <p className="text-xs text-slate-400">
-              自定义变量 <span className="text-slate-600">−/＋ 计数，模板里 {"{A1}"} 引用</span>
+              自定义变量{" "}
+              <span className="text-slate-600">−/＋ 计数，模板里 {"{A1}"} 引用；要让 A1 跟着 A3，在 A1 行设置「联动」</span>
             </p>
             <button
               onClick={() => run(addVariable(overlay.id, "新变量", null, 0, 1))}
@@ -272,7 +273,13 @@ function OverlayEditor({
           </div>
           <div className="mt-2 space-y-2">
             {overlay.variables.map((v) => (
-              <VarRow key={v.id} variable={v} overlayId={overlay.id} run={run} />
+              <VarRow
+                key={v.id}
+                variable={v}
+                variables={overlay.variables}
+                overlayId={overlay.id}
+                run={run}
+              />
             ))}
             {overlay.variables.length === 0 && (
               <p className="rounded-xl border border-dashed border-slate-800 px-4 py-5 text-center text-xs text-slate-600">
@@ -457,18 +464,50 @@ function useRowDraft<T extends { id: number }>(source: T, run: Run, submit: (dra
   return { draft, commit, editing };
 }
 
+/** root 的所有下游（直接/间接跟随 root 的变量）。选跟随目标时排除，避免成环。 */
+function descendantsOf(vars: UserVar[], rootId: number): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const v of vars) {
+    if (v.followId) {
+      const list = children.get(v.followId) ?? [];
+      list.push(v.id);
+      children.set(v.followId, list);
+    }
+  }
+  const out = new Set<number>();
+  const stack = [rootId];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    for (const child of children.get(cur) ?? []) {
+      if (!out.has(child)) {
+        out.add(child);
+        stack.push(child);
+      }
+    }
+  }
+  return out;
+}
+
 function VarRow({
   variable,
+  variables,
   overlayId,
   run,
 }: {
   variable: UserVar;
+  variables: UserVar[];
   overlayId: number;
   run: Run;
 }) {
   const { draft, commit, editing } = useRowDraft(variable, run, (d) =>
     updateVariable(overlayId, { ...d, step: d.step > 0 ? d.step : 1 }),
   );
+
+  // 联动选项：不能选自己，也不能选自己的下游（否则会成环）
+  const blocked = descendantsOf(variables, draft.id);
+  const followOptions = variables.filter((v) => v.id !== draft.id && !blocked.has(v.id));
+  const followSource = variables.find((v) => v.id === draft.followId);
+  const followers = variables.filter((v) => v.followId === draft.id);
 
   return (
     <div
@@ -526,6 +565,35 @@ function VarRow({
         title={`删除变量「${draft.name}」`}
         onConfirm={() => run(deleteVariable(overlayId, draft.id))}
       />
+
+      {/* 联动：本变量跟随谁。被跟随变量 −/＋ 时，本变量同步同幅度的增减（单向）。 */}
+      <div className="flex w-full flex-wrap items-center gap-2 border-t border-slate-800/70 pt-2">
+        <span className="text-xs text-slate-500">🔗 联动</span>
+        <select
+          value={draft.followId}
+          onChange={(e) => commit({ followId: Number(e.target.value) }, true)}
+          aria-label="联动：跟随哪个变量"
+          title="被跟随的变量每次 −/＋，这个变量也跟着同样幅度变化（单向）"
+          className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-300 outline-none transition focus:border-cyan-500"
+        >
+          <option value={0}>不跟随</option>
+          {followOptions.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.key} · {v.name}
+            </option>
+          ))}
+        </select>
+        <span className="text-[11px] leading-5 text-slate-500">
+          {followSource
+            ? `跟随 ${followSource.key}：它 −/＋ 时，这个变量同步 −/＋（同幅度，单向）`
+            : ""}
+        </span>
+        {followers.length > 0 && (
+          <span className="rounded-full border border-cyan-800/60 bg-cyan-950/30 px-2 py-0.5 font-mono text-[10px] text-cyan-400">
+            被 {followers.map((v) => v.key).join("、")} 跟随
+          </span>
+        )}
+      </div>
     </div>
   );
 }

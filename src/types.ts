@@ -10,6 +10,9 @@ export interface UserVar {
   value: number;
   /** 每按一次 −/＋ 增减多少 */
   step: number;
+  /** 联动：跟随本套哪个变量（UserVar.id；0 = 不跟随）。
+   *  被跟随变量每次 −/＋，本变量同步同样的实际增减幅度。 */
+  followId: number;
   /** 毫秒时间戳 */
   createdAt: number;
 }

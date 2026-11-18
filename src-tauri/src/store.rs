@@ -5,7 +5,7 @@
 //!
 //! 表结构：
 //! - `overlays`  浮窗（套）队列：可多个，含名字/创建时间等基本信息 + 每套自己的账号
-//! - `variables` 自定义变量，归属某个浮窗（overlay_id）
+//! - `variables` 自定义变量，归属某个浮窗（overlay_id；follow_id 表示跟随本套哪个变量）
 //! - `computed`  计算变量，归属某个浮窗（overlay_id）
 //! - `meta`      杂项键值（保留；旧版全局账号迁移后不再使用）
 //!
@@ -34,6 +34,9 @@ pub struct UserVar {
     pub value: f64,
     /// 每按一次 −/＋ 增减多少
     pub step: f64,
+    /// 联动：跟随本套哪个变量（variables.id；0 = 不跟随）。
+    /// 被跟随变量每次 −/＋，本变量也同步同样的实际增减幅度。
+    pub follow_id: i64,
     pub created_at: i64,
 }
 
@@ -162,6 +165,7 @@ CREATE TABLE IF NOT EXISTS variables (
     name        TEXT NOT NULL,
     value       REAL NOT NULL DEFAULT 0,
     step        REAL NOT NULL DEFAULT 1,
+    follow_id   INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
     UNIQUE (overlay_id, key)
 );
@@ -247,6 +251,26 @@ fn ensure_wrap_columns(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// variables 表补 follow_id 列（联动，v3 → 当前）。
+/// 已有列则跳过（全新库由 CREATE_SQL 直接建出，迁移库走 ALTER）。
+fn ensure_follow_column(conn: &Connection) -> Result<(), String> {
+    let has_follow: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('variables') WHERE name = 'follow_id'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("检查 follow_id 列失败：{e}"))?;
+    if has_follow == 0 {
+        conn.execute(
+            "ALTER TABLE variables ADD COLUMN follow_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("补 follow_id 列失败：{e}"))?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// 打开数据库、建表；首次使用时种入示例数据，并尝试从旧版数据迁移。
     pub fn new(db_path: PathBuf) -> Result<Self, String> {
@@ -263,6 +287,7 @@ impl Store {
         conn.execute_batch(CREATE_SQL).map_err(|e| format!("建表失败：{e}"))?;
         ensure_account_column(&conn)?;
         ensure_wrap_columns(&conn)?;
+        ensure_follow_column(&conn)?;
 
         let store = Self { conn: Mutex::new(conn) };
         if was_v1 {
@@ -743,7 +768,54 @@ impl Store {
         Ok(())
     }
 
-    /// 更新变量的名称/引用名/步长。数值只能由 step_variable 原子增减：
+    /// 校验联动目标：必须属于同一套、不能是自己、不能形成环。
+    fn validate_follow(
+        conn: &Connection,
+        overlay_id: i64,
+        id: i64,
+        follow_id: i64,
+    ) -> Result<(), String> {
+        if follow_id == 0 {
+            return Ok(());
+        }
+        if follow_id == id {
+            return Err("变量不能跟随自己".into());
+        }
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM variables WHERE id = ?1 AND overlay_id = ?2",
+                params![follow_id, overlay_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if exists.is_none() {
+            return Err("要跟随的变量不存在（或不属于该浮窗）".into());
+        }
+        // 从目标出发沿"它跟随谁"往上走，若绕回自己就会成环
+        let mut cur = follow_id;
+        let mut seen = std::collections::HashSet::new();
+        while cur != 0 {
+            if cur == id {
+                return Err("联动会形成循环，请换一个变量".into());
+            }
+            if !seen.insert(cur) {
+                return Err("联动配置里已有循环，请重新选择".into());
+            }
+            cur = conn
+                .query_row(
+                    "SELECT follow_id FROM variables WHERE id = ?1 AND overlay_id = ?2",
+                    params![cur, overlay_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    /// 更新变量的名称/引用名/步长/联动目标。数值只能由 step_variable 原子增减：
     /// 若这里把编辑草稿里的旧 value 一起写回，防抖保存就可能抵消刚点的＋/−。
     pub fn update_variable(&self, overlay_id: i64, var: &UserVar) -> Result<(), String> {
         Self::validate_key(&var.key)?;
@@ -752,10 +824,18 @@ impl Store {
             return Err("变量显示名不能为空".into());
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::validate_follow(&conn, overlay_id, var.id, var.follow_id)?;
         let changed = conn
             .execute(
-                "UPDATE variables SET key = ?1, name = ?2, step = ?3 WHERE id = ?4 AND overlay_id = ?5",
-                params![var.key, name, if var.step > 0.0 { var.step } else { 1.0 }, var.id, overlay_id],
+                "UPDATE variables SET key = ?1, name = ?2, step = ?3, follow_id = ?4 WHERE id = ?5 AND overlay_id = ?6",
+                params![
+                    var.key,
+                    name,
+                    if var.step > 0.0 { var.step } else { 1.0 },
+                    var.follow_id,
+                    var.id,
+                    overlay_id
+                ],
             )
             .map_err(|e| {
                 if e.to_string().contains("UNIQUE") {
@@ -771,22 +851,24 @@ impl Store {
     }
 
     /// 计数器语义：不允许减到负数。
+    /// 联动：变量变化后，所有（直接/间接）跟随它的变量同步同样的实际幅度。
     pub fn step_variable(&self, overlay_id: i64, id: i64, delta: f64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let changed = conn
-            .execute(
-                "UPDATE variables SET value = MAX(0, value + ?1) WHERE id = ?2 AND overlay_id = ?3",
-                params![delta, id, overlay_id],
-            )
-            .map_err(|e| e.to_string())?;
-        if changed == 0 {
-            return Err(format!("变量 #{id} 不存在（或不属于该浮窗）"));
-        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let applied = apply_step(&tx, overlay_id, id, delta)?;
+        propagate_followers(&tx, overlay_id, id, applied)?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn delete_variable(&self, overlay_id: i64, id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // 被删掉的变量不能继续被跟随：把指向它的联动清空
+        conn.execute(
+            "UPDATE variables SET follow_id = 0 WHERE overlay_id = ?1 AND follow_id = ?2",
+            params![overlay_id, id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM variables WHERE id = ?1 AND overlay_id = ?2",
             params![id, overlay_id],
@@ -882,6 +964,74 @@ impl Store {
     }
 }
 
+/// 给单个变量加减 delta（下限 0），返回实际变化量。
+fn apply_step(
+    tx: &rusqlite::Transaction<'_>,
+    overlay_id: i64,
+    id: i64,
+    delta: f64,
+) -> Result<f64, String> {
+    let old: f64 = tx
+        .query_row(
+            "SELECT value FROM variables WHERE id = ?1 AND overlay_id = ?2",
+            params![id, overlay_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| format!("变量 #{id} 不存在（或不属于该浮窗）"))?;
+    tx.execute(
+        "UPDATE variables SET value = MAX(0, value + ?1) WHERE id = ?2 AND overlay_id = ?3",
+        params![delta, id, overlay_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let new: f64 = tx
+        .query_row(
+            "SELECT value FROM variables WHERE id = ?1 AND overlay_id = ?2",
+            params![id, overlay_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(new - old)
+}
+
+/// 从被操作的变量出发，按"谁跟随它"的边向下传播实际变化量。
+/// 每个变量一次操作最多更新一次（visited），即使旧数据里有环也不会死循环。
+fn propagate_followers(
+    tx: &rusqlite::Transaction<'_>,
+    overlay_id: i64,
+    source_id: i64,
+    delta: f64,
+) -> Result<(), String> {
+    if delta == 0.0 {
+        return Ok(());
+    }
+    let mut stack = vec![(source_id, delta)];
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(source_id);
+    while let Some((src, d)) = stack.pop() {
+        let followers: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM variables WHERE overlay_id = ?1 AND follow_id = ?2 ORDER BY id",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![overlay_id, src], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for fid in followers {
+            if !visited.insert(fid) {
+                continue;
+            }
+            let applied = apply_step(tx, overlay_id, fid, d)?;
+            if applied != 0.0 {
+                stack.push((fid, applied));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 给某浮窗补一套示范变量：A1-A4（人机/真人 场次与胜场）+ B1-B4 计算变量。
 /// `demo_values = true` 时填入示范数值 6/2/6/1，否则全部从 0 开始。
 fn insert_seed_vars(
@@ -953,9 +1103,9 @@ pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
 
 /// 加载某浮窗的自定义变量。
 fn load_variables(conn: &Connection, overlay_id: i64) -> Vec<UserVar> {
-    let mut stmt = match conn
-        .prepare("SELECT id, key, name, value, step, created_at FROM variables WHERE overlay_id = ?1 ORDER BY id")
-    {
+    let mut stmt = match conn.prepare(
+        "SELECT id, key, name, value, step, follow_id, created_at FROM variables WHERE overlay_id = ?1 ORDER BY id",
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("查询 variables 失败：{e}");
@@ -969,7 +1119,8 @@ fn load_variables(conn: &Connection, overlay_id: i64) -> Vec<UserVar> {
             name: row.get(2)?,
             value: row.get(3)?,
             step: row.get(4)?,
-            created_at: row.get(5)?,
+            follow_id: row.get(5)?,
+            created_at: row.get(6)?,
         })
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -1006,4 +1157,143 @@ fn load_computed(conn: &Connection, overlay_id: i64) -> Vec<ComputedVar> {
         eprintln!("读取 computed 失败：{e}");
         vec![]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn test_dir() -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "izuna-toolbox-test-{}-{}-{}",
+            std::process::id(),
+            now_ms(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_store() -> (Store, PathBuf) {
+        let dir = test_dir();
+        let store = Store::new(dir.join("test.db")).unwrap();
+        (store, dir)
+    }
+
+    fn var(store: &Store, key: &str) -> UserVar {
+        store
+            .get()
+            .overlays
+            .into_iter()
+            .find(|o| o.id == 1)
+            .and_then(|o| o.variables.into_iter().find(|v| v.key == key))
+            .unwrap_or_else(|| panic!("变量 {key} 不存在"))
+    }
+
+    fn set_follow(store: &Store, key: &str, source: &str) {
+        let mut v = var(store, key);
+        v.follow_id = var(store, source).id;
+        store.update_variable(1, &v).unwrap();
+    }
+
+    fn cleanup(store: Store, dir: PathBuf) {
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn follow_mirrors_steps_and_rejects_cycle() {
+        let (store, dir) = test_store();
+        let a1 = var(&store, "A1");
+        let a3 = var(&store, "A3");
+        set_follow(&store, "A1", "A3");
+
+        store.step_variable(1, a3.id, 1.0).unwrap();
+        assert_eq!(var(&store, "A1").value, a1.value + 1.0);
+        assert_eq!(var(&store, "A3").value, a3.value + 1.0);
+
+        store.step_variable(1, a3.id, -1.0).unwrap();
+        assert_eq!(var(&store, "A1").value, a1.value);
+        assert_eq!(var(&store, "A3").value, a3.value);
+
+        // 反向跟随会成环，应被拒绝
+        let mut back = var(&store, "A3");
+        back.follow_id = var(&store, "A1").id;
+        assert!(store.update_variable(1, &back).is_err());
+
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn follow_supports_chain_and_cleans_up_on_delete() {
+        let (store, dir) = test_store();
+        let a1 = var(&store, "A1");
+        let a2 = var(&store, "A2");
+        let a3 = var(&store, "A3");
+        set_follow(&store, "A1", "A3");
+        set_follow(&store, "A2", "A1");
+
+        store.step_variable(1, a3.id, 1.0).unwrap();
+        assert_eq!(var(&store, "A3").value, a3.value + 1.0);
+        assert_eq!(var(&store, "A1").value, a1.value + 1.0);
+        assert_eq!(var(&store, "A2").value, a2.value + 1.0);
+
+        store.delete_variable(1, a3.id).unwrap();
+        assert_eq!(var(&store, "A1").follow_id, 0);
+        // A2 仍然跟随 A1，只是 A1 不再跟随已删除的 A3
+        assert_eq!(var(&store, "A2").follow_id, var(&store, "A1").id);
+
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn follow_stops_at_zero() {
+        let (store, dir) = test_store();
+        set_follow(&store, "A1", "A3");
+        let a3 = var(&store, "A3");
+        for _ in 0..8 {
+            store.step_variable(1, a3.id, -1.0).unwrap();
+        }
+        assert_eq!(var(&store, "A3").value, 0.0);
+        assert_eq!(var(&store, "A1").value, 0.0);
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn migration_adds_follow_column_without_losing_data() {
+        let dir = test_dir();
+        let db_path = dir.join("legacy.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // 模拟升级前的库：结构相同，但没有 follow_id 列
+            let old_sql = CREATE_SQL.replace("    follow_id   INTEGER NOT NULL DEFAULT 0,\n", "");
+            assert!(!old_sql.contains("follow_id"), "测试库应模拟没有 follow_id 的旧结构");
+            conn.execute_batch(&old_sql).unwrap();
+            conn.execute(
+                "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
+                 VALUES (1, '旧浮窗', '', '场次 {A1}', 1, 1, 0, 0, 0, 20, '#ffffff', 0, 1, '#0f172a', 55, 1, 460, ?1)",
+                params![now_ms()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (1, 'A1', '场次', 3, 1, ?1)",
+                params![now_ms()],
+            )
+            .unwrap();
+        }
+
+        let store = Store::new(db_path).unwrap();
+        let cfg = store.get();
+        assert_eq!(cfg.overlays.len(), 1);
+        assert_eq!(cfg.overlays[0].variables.len(), 1);
+        assert_eq!(cfg.overlays[0].variables[0].key, "A1");
+        assert_eq!(cfg.overlays[0].variables[0].value, 3.0);
+        assert_eq!(cfg.overlays[0].variables[0].follow_id, 0);
+
+        cleanup(store, dir);
+    }
 }
