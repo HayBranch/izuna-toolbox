@@ -1,6 +1,6 @@
 version: "1.0"
-name: 测试、构建、上传、发布、部署到自有主机
-displayName: 测试、构建、上传、发布、部署到自有主机
+name: tauri-build-release
+displayName: Tauri 构建发布
 stages:
 - name: 构建
   displayName: 构建
@@ -9,22 +9,22 @@ stages:
   steps:
   - step: build@nodejs
     name: _1
-    displayName: Nodejs 构建
-    nodeVersion: 26.13.1
+    displayName: Tauri 构建
+    nodeVersion: 20.18.0          # Node 26 不存在，改成稳定版 20
     commands:
-    - "# 设置NPM源，提升安装速度"
     - npm config set registry https://registry.npmmirror.com
-    - ""
-    - "# 执行编译命令"
-    - npm install && npm run bundle
+    # Tauri 2 Linux 打包必需的系统库，缺了 tauri build 直接挂
+    - apt-get update && apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+    - npm install
+    - npm run tauri build          # Tauri 打包命令，不是 npm run bundle
     artifacts:
     - name: BUILD_ARTIFACT
       path:
-      - ./dist
+      - ./src-tauri/target/release/bundle   # 产物在这里，不是 ./dist
       type: .tar.gz
     caches:
     - "~/.npm"
-    - "~/.yarn"
+    - "~/.cargo"
     notify: []
     strategy:
       retry: "0"
