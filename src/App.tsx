@@ -35,6 +35,7 @@ export default function App() {
 function MainShell() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [pinned, setPinned] = useState(false);
 
   // 重开应用时恢复上次的「主窗口置顶」选择
@@ -60,6 +61,30 @@ function MainShell() {
     } catch (e) {
       console.warn(e);
     }
+  };
+
+  // 拉取配置（带超时）：首次加载与错误态「重试」共用。
+  // 超时是关键——若 IPC 永久挂起（数据库锁死、命令 panic 等），
+  // 不至于永远停在"正在加载"，而是进错误态让用户能看到原因并重试。
+  const loadConfig = () => {
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("加载超时（10s）")), 10_000);
+    });
+    setConfigError(null);
+    Promise.race([getConfig(), timeout])
+      .then((c) => {
+        clearTimeout(timer);
+        setConfig(c);
+        setConfigError(null);
+      })
+      .catch((e) => {
+        clearTimeout(timer);
+        // 失败必须让人看见：否则 config 一直是 null，界面停在"正在加载…"，
+        // 看起来像卡死，其实是 IPC 一次性失败（或挂起后被超时打断）。
+        console.warn(e);
+        setConfigError(String(e));
+      });
   };
 
   useEffect(() => {
@@ -89,10 +114,7 @@ function MainShell() {
       );
     };
     register();
-
-    getConfig()
-      .then((c) => alive && setConfig(c))
-      .catch(console.warn);
+    loadConfig();
 
     // 命令返回的配置也直接采用：不依赖事件是否送达（见 api.ts 配置总线）
     const offBus = subscribeConfig((c) => {
@@ -176,7 +198,21 @@ function MainShell() {
         </header>
 
         {!config ? (
-          <p className="animate-pulse text-sm text-slate-500">正在从 Rust 加载配置…</p>
+          configError ? (
+            <div className="rounded-xl border border-rose-500/30 bg-rose-950 px-4 py-3 text-sm text-rose-300" role="alert">
+              <p className="font-medium">加载配置失败</p>
+              <p className="mt-1 break-all font-mono text-xs text-rose-400">{configError}</p>
+              <button
+                type="button"
+                onClick={loadConfig}
+                className="mt-3 rounded-lg border border-rose-500/50 px-3 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-500/20"
+              >
+                重试
+              </button>
+            </div>
+          ) : (
+            <p className="animate-pulse text-sm text-slate-500">正在从 Rust 加载配置…</p>
+          )
         ) : (
           <OverlaysPage config={config} />
         )}
