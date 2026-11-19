@@ -36,8 +36,20 @@ v*:
           # 说明：tauri-action 属于 GitHub 专属 Action，CNB 无对应插件，
           # 此处改为直接调用 tauri CLI 构建；发布动作由后续 cnb:release 承担
 
+        # 当前 CNB 构建节点是 Linux，Tauri 只能产出 Linux 二进制；
+        # 便携包面向 Windows，需先把 Rust 目标切到 windows-x64-gnu 并构建 exe。
+        - name: prepare windows portable exe
+          script: |
+            . "$CARGO_HOME/env"
+            rustup target add x86_64-pc-windows-gnu
+            apt-get update
+            apt-get install -y --no-install-recommends mingw-w64 zip
+            npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
+
         - name: package portable zip
           script: |
+            cp src-tauri/target/x86_64-pc-windows-gnu/release/izuna-toolbox.exe \
+              src-tauri/target/release/izuna-toolbox.exe
             node scripts/package-portable.mjs
 
         - name: upload portable artifact
@@ -100,8 +112,20 @@ $:
             . "$CARGO_HOME/env"
             npm run tauri build
 
+        # 当前 CNB 构建节点是 Linux，Tauri 只能产出 Linux 二进制；
+        # 便携包面向 Windows，需先把 Rust 目标切到 windows-x64-gnu 并构建 exe。
+        - name: prepare windows portable exe
+          script: |
+            . "$CARGO_HOME/env"
+            rustup target add x86_64-pc-windows-gnu
+            apt-get update
+            apt-get install -y --no-install-recommends mingw-w64 zip
+            npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
+
         - name: package portable zip
           script: |
+            cp src-tauri/target/x86_64-pc-windows-gnu/release/izuna-toolbox.exe \
+              src-tauri/target/release/izuna-toolbox.exe
             node scripts/package-portable.mjs
 
         - name: upload portable artifact
