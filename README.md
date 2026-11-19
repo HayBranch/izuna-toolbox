@@ -118,6 +118,21 @@ npm run bundle:portable  # 打包：便携版目录 + zip（dist-portable/）
 GitHub Actions 打 tag（`v*`）时会把 NSIS 安装包和便携版 zip 一起传到 Release，
 手动触发 workflow 时也可以在 Actions Artifact 里下载。
 
+### 改版本号
+
+版本号**唯一来源是根目录 `package.json`**：
+
+- `src-tauri/tauri.conf.json` 的 `version` 写成 `"../package.json"`，安装包/exe 版本自动跟随；
+- 前端通过 Vite 注入的 `__APP_VERSION__` 读取同一个值（关于弹窗显示）；
+- `src-tauri/Cargo.toml` 里的 `0.0.0` 只是占位，不参与展示，不用改。
+
+```bash
+npm run bump -- 0.0.4   # 只改版本号（同步 package-lock.json），不提交、不打 tag
+git commit -am "chore: 版本号改为 0.0.4"
+git tag -a v0.0.4 -m "Izuna Toolbox v0.0.4"
+git push origin master v0.0.4
+```
+
 ## 目录结构
 
 ```

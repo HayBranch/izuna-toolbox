@@ -1,6 +1,8 @@
 [package]
 name = "izuna-toolbox"
-version = "0.0.3"
+# 占位：应用版本号唯一来源是根目录 package.json
+# （src-tauri/tauri.conf.json 的 version 指向它，安装包与前端都跟随）
+version = "0.0.0"
 description = "泉奈工具箱：OBS 可捕获的悬浮字幕桌面工具"
 authors = ["you"]
 edition = "2021"

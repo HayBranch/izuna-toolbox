@@ -1141,26 +1141,30 @@ mod tests {
     #[test]
     fn fresh_db_seeds_demo_values_and_follow_links() {
         let (store, dir) = test_store();
-        let a1 = var(&store, "A1");
-        let a2 = var(&store, "A2");
-        let a3 = var(&store, "A3");
-        let a4 = var(&store, "A4");
 
-        // 空库初始化带示范数值
-        assert_eq!(
-            (a1.value, a2.value, a3.value, a4.value),
-            (6.0, 2.0, 6.0, 1.0)
-        );
-        // 默认联动：场次跟随对应胜场
-        assert_eq!(a1.follow_id, a3.id);
-        assert_eq!(a2.follow_id, a4.id);
-        assert_eq!(a3.follow_id, 0);
-        assert_eq!(a4.follow_id, 0);
+        // 空库初始化：每个变量的示范值/步长/默认联动都应与 SEED_VARIABLES 一致
+        for seed in SEED_VARIABLES {
+            let seeded = var(&store, seed.key);
+            assert_eq!(seeded.value, seed.value, "变量 {} 初始值", seed.key);
+            assert_eq!(seeded.step, seed.step, "变量 {} 步长", seed.key);
+            let want_follow = seed
+                .follow
+                .map(|target| var(&store, target).id)
+                .unwrap_or(0);
+            assert_eq!(seeded.follow_id, want_follow, "变量 {} 默认联动", seed.key);
+        }
 
-        // 联动确实生效：人机胜场 +1 → 人机场次也 +1
-        store.step_variable(1, a3.id, 1.0).unwrap();
-        assert_eq!(var(&store, "A3").value, 7.0);
-        assert_eq!(var(&store, "A1").value, 7.0);
+        // 联动确实生效：被跟随变量 +1 → 跟随者同步 +1
+        let follower = SEED_VARIABLES
+            .iter()
+            .find(|v| v.follow.is_some())
+            .expect("默认配置里至少应有一个联动");
+        let target = follower.follow.unwrap();
+        let follower_before = var(&store, follower.key).value;
+        let target_before = var(&store, target).value;
+        store.step_variable(1, var(&store, target).id, 1.0).unwrap();
+        assert_eq!(var(&store, target).value, target_before + 1.0);
+        assert_eq!(var(&store, follower.key).value, follower_before + 1.0);
         cleanup(store, dir);
     }
 
@@ -1177,12 +1181,19 @@ mod tests {
         }
         // 重新打开 = 模拟重启，触发补种
         let store = Store::new(path).unwrap();
-        let a1 = var(&store, "A1");
-        assert_eq!(a1.value, 0.0, "补种不应带示范数值");
-        assert_eq!(a1.follow_id, var(&store, "A3").id);
+        for seed in SEED_VARIABLES {
+            let seeded = var(&store, seed.key);
+            assert_eq!(seeded.value, 0.0, "补种不应带示范数值：{}", seed.key);
+            assert_eq!(
+                seeded.follow_id,
+                seed.follow
+                    .map(|target| var(&store, target).id)
+                    .unwrap_or(0),
+                "补种应保留默认联动：{}",
+                seed.key
+            );
+        }
         // 计算变量还在，不应重复插入
-        assert_eq!(var(&store, "A2").value, 0.0);
-        assert_eq!(var(&store, "A2").follow_id, var(&store, "A4").id);
         assert_eq!(store.get().overlays[0].computed.len(), SEED_COMPUTED.len());
         cleanup(store, dir);
     }
