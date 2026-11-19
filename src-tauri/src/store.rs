@@ -100,8 +100,112 @@ pub struct Config {
     pub overlays: Vec<OverlayConfig>,
 }
 
+// ---------- 空库 / 新浮窗的默认数据（要改初始配置，只改这一段） ----------
+//
+// - `DEFAULT_TEMPLATE` / `DEFAULT_OVERLAY_NAME`：默认模板与浮窗名
+// - `SEED_VARIABLES`：默认自定义变量（含示范值、步长、联动）
+// - `SEED_COMPUTED`：默认计算变量
+//
+// 空库初始化（第一次启动）用 `SEED_VARIABLES` 里的示范数值；
+// 之后新建浮窗、变量被删光后的补种，都用同一套定义但数值从 0 开始。
+
 /// 默认模板：多行排版示范变量引用与计算变量的用法，可随意改（`\n` 即换行）。
 pub const DEFAULT_TEMPLATE: &str = "今日{today} · 账号：{account}\n总场次：{B1}（人机 {A1}｜真人 {A2}）\n胜场：{B2}（人机 {A3}｜真人 {A4}）\n总胜率：{B3}｜真实胜率：{B4}";
+
+/// 默认浮窗名。
+pub const DEFAULT_OVERLAY_NAME: &str = "战绩浮窗";
+
+/// 一个默认自定义变量的定义。
+struct SeedVar {
+    /// 引用名：模板/表达式里用 `{A1}` 这样引用
+    key: &'static str,
+    /// 界面显示名
+    name: &'static str,
+    /// 空库初始化时的示范数值（补种时不使用，一律 0）
+    value: f64,
+    /// 每次 −/＋ 的步长
+    step: f64,
+    /// 默认联动：跟随本表里的哪个 key（None = 不跟随）。
+    /// 被跟随变量每次 −/＋，本变量同步同样的实际幅度（单向）。
+    follow: Option<&'static str>,
+}
+
+/// 默认自定义变量（顺序即界面顺序，key 必须是 A + 数字）。
+const SEED_VARIABLES: &[SeedVar] = &[
+    // 场次跟随胜场：记一场胜场时，对应场次自动 +1
+    SeedVar {
+        key: "A1",
+        name: "人机场次",
+        value: 4.0,
+        step: 1.0,
+        follow: Some("A3"),
+    },
+    SeedVar {
+        key: "A2",
+        name: "真人场次",
+        value: 3.0,
+        step: 1.0,
+        follow: Some("A4"),
+    },
+    SeedVar {
+        key: "A3",
+        name: "人机胜场",
+        value: 4.0,
+        step: 1.0,
+        follow: None,
+    },
+    SeedVar {
+        key: "A4",
+        name: "真人胜场",
+        value: 1.0,
+        step: 1.0,
+        follow: None,
+    },
+];
+
+/// 一个默认计算变量的定义。
+struct SeedComputed {
+    key: &'static str,
+    name: &'static str,
+    /// 表达式，可引用本表/上面的变量
+    expr: &'static str,
+    /// `plain` 普通数 | `percent` 百分比
+    format: &'static str,
+    /// 小数点位数 0-6
+    decimals: i64,
+}
+
+/// 默认计算变量（只读，由表达式求值）。
+const SEED_COMPUTED: &[SeedComputed] = &[
+    SeedComputed {
+        key: "B1",
+        name: "总场次",
+        expr: "A1 + A2",
+        format: "plain",
+        decimals: 0,
+    },
+    SeedComputed {
+        key: "B2",
+        name: "总胜场",
+        expr: "A3 + A4",
+        format: "plain",
+        decimals: 0,
+    },
+    SeedComputed {
+        key: "B3",
+        name: "总胜率",
+        expr: "B2 / B1",
+        format: "percent",
+        decimals: 1,
+    },
+    SeedComputed {
+        key: "B4",
+        name: "真实胜率",
+        expr: "A4 / B1",
+        format: "percent",
+        decimals: 1,
+    },
+];
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -179,14 +283,17 @@ impl Store {
         Ok(store)
     }
 
-    /// 修复：模板引用了变量但一套都没有（比如删光了变量）→ 补种子。
+    /// 修复：模板引用了变量但变量被删光（或计算变量缺失）→ 补种子。
+    /// 补种数值一律为 0，不冒充真实数据。
     fn repair_missing_computed(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let ids: Vec<i64> = {
             let mut stmt = conn
                 .prepare("SELECT id FROM overlays")
                 .map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         };
         for id in ids {
@@ -211,23 +318,27 @@ impl Store {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .map_err(|e| e.to_string())?;
-            if vcount == 0 && ccount == 0 && (refs_a + refs_b) > 0 {
-                // 整套变量都缺 → 补一套示范（数值 0，不冒充真实数据）
-                insert_seed_vars(&conn, id, now_ms(), false)?;
-            } else if ccount == 0 && refs_b > 0 {
-                insert_seed_computed(&conn, id, now_ms())?;
+            let now = now_ms();
+            // 自定义变量被删光（但模板还引用着变量）→ 只补变量，计算变量已存在的保留
+            if vcount == 0 && (refs_a + refs_b) > 0 {
+                insert_seed_variables(&conn, id, now, false)?;
+            }
+            // 计算变量缺失但模板引用着 {B..} → 只补计算变量
+            if ccount == 0 && refs_b > 0 {
+                insert_seed_computed(&conn, id, now)?;
             }
         }
         Ok(())
     }
 
-    /// 给某浮窗种入示例变量（A1-A4 + B1-B4）。`demo_values = true` 时带示范数值。
+    /// 给某浮窗种入默认变量（`SEED_VARIABLES` + `SEED_COMPUTED`）。
+    /// `demo_values = true` 时带示范数值（空库初始化），否则全部从 0 开始。
     pub fn seed_example_variables(&self, overlay_id: i64, demo_values: bool) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         insert_seed_vars(&conn, overlay_id, now_ms(), demo_values)
     }
 
-    /// 全新数据库：种入一套示例浮窗（对应"战绩"场景）。
+    /// 全新数据库：种入一套默认浮窗（对应"战绩"场景）。
     fn seed_if_fresh(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let overlays: i64 = conn
@@ -237,13 +348,11 @@ impl Store {
             return Ok(());
         }
         let now = now_ms();
-        conn.execute(
-            "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, created_at)
-             VALUES (1, '战绩浮窗', '', ?1, 1, 1, 0, 0, 40, 20, '#ffffff', 0, 1, '#0f172a', 55, ?2)",
-            params![DEFAULT_TEMPLATE, now],
-        )
-        .map_err(|e| e.to_string())?;
-        // 示范数值（6/2/6/1），方便第一次打开就看到效果
+        // 默认浮窗：名字/模板/样式见 default_overlay，位置略下移避免贴屏幕顶边
+        let mut cfg = default_overlay(1, now);
+        cfg.y = 40;
+        insert_overlay(&conn, &cfg)?;
+        // 示范数值 + 默认联动，第一次打开就能看到完整效果
         insert_seed_vars(&conn, 1, now, true)?;
         Ok(())
     }
@@ -308,8 +417,10 @@ impl Store {
             Ok(c) => c,
             Err(_) => return false,
         };
-        conn.query_row("SELECT 1 FROM overlays WHERE id = ?1", params![id], |_| Ok(()))
-            .is_ok()
+        conn.query_row("SELECT 1 FROM overlays WHERE id = ?1", params![id], |_| {
+            Ok(())
+        })
+        .is_ok()
     }
 
     // ---------- 浮窗（套） ----------
@@ -318,26 +429,16 @@ impl Store {
     pub fn next_overlay_id(&self) -> i64 {
         let conn = self.conn.lock().unwrap();
         let max: i64 = conn
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM overlays", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM overlays", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         now_ms().max(max + 1)
     }
 
     pub fn push_overlay(&self, cfg: &OverlayConfig) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            params![
-                cfg.id, cfg.name, cfg.account, cfg.template,
-                cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
-                cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
-                cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-                cfg.wrap as i64, cfg.max_width, cfg.created_at
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        insert_overlay(&conn, cfg)
     }
 
     /// 更新浮窗的名称/账号/模板/样式（**有意不更新 x/y**——位置只由拖动回写和
@@ -364,7 +465,10 @@ impl Store {
     pub fn move_overlay(&self, id: i64, x: i32, y: i32) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
-            .execute("UPDATE overlays SET x = ?1, y = ?2 WHERE id = ?3", params![x, y, id])
+            .execute(
+                "UPDATE overlays SET x = ?1, y = ?2 WHERE id = ?3",
+                params![x, y, id],
+            )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err(format!("浮窗 #{id} 不存在"));
@@ -392,7 +496,12 @@ impl Store {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE overlays SET shown = ?2, always_on_top = ?3, click_through = ?4 WHERE id = ?1",
-            params![id, probe.shown as i64, probe.always_on_top as i64, probe.click_through as i64],
+            params![
+                id,
+                probe.shown as i64,
+                probe.always_on_top as i64,
+                probe.click_through as i64
+            ],
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -413,7 +522,10 @@ impl Store {
     /// 拖动浮窗时由 Moved 事件回写位置。
     pub fn set_position(&self, id: i64, x: i32, y: i32) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute("UPDATE overlays SET x = ?1, y = ?2 WHERE id = ?3", params![x, y, id]);
+        let _ = conn.execute(
+            "UPDATE overlays SET x = ?1, y = ?2 WHERE id = ?3",
+            params![x, y, id],
+        );
     }
 
     // ---------- 套内变量 ----------
@@ -435,7 +547,11 @@ impl Store {
 
     /// 生成下一可用 key：扫描**本浮窗**现有 `A{n}` 取最大 n+1（computed 用 B 前缀）。
     fn next_key(conn: &Connection, overlay_id: i64, prefix: &str) -> Result<String, String> {
-        let table = if prefix == "A" { "variables" } else { "computed" };
+        let table = if prefix == "A" {
+            "variables"
+        } else {
+            "computed"
+        };
         let mut stmt = conn
             .prepare(&format!("SELECT key FROM {table} WHERE overlay_id = ?1"))
             .map_err(|e| e.to_string())?;
@@ -621,7 +737,11 @@ impl Store {
         if !self.overlay_exists(overlay_id) {
             return Err("浮窗不存在，先创建浮窗".into());
         }
-        let format = if format == "percent" { "percent" } else { "plain" };
+        let format = if format == "percent" {
+            "percent"
+        } else {
+            "plain"
+        };
         let decimals = decimals.clamp(0, 6);
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let key = match key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
@@ -655,7 +775,11 @@ impl Store {
         if expr.is_empty() {
             return Err("表达式不能为空".into());
         }
-        let format = if var.format == "percent" { "percent" } else { "plain" };
+        let format = if var.format == "percent" {
+            "percent"
+        } else {
+            "plain"
+        };
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
@@ -684,6 +808,23 @@ impl Store {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// 写入一条浮窗记录（新浮窗与空库初始化共用）。
+fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            cfg.id, cfg.name, cfg.account, cfg.template,
+            cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
+            cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
+            cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
+            cfg.wrap as i64, cfg.max_width, cfg.created_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 给单个变量加减 delta（下限 0），返回实际变化量。
@@ -754,43 +895,55 @@ fn propagate_followers(
     Ok(())
 }
 
-/// 给某浮窗补一套示范变量：A1-A4（人机/真人 场次与胜场）+ B1-B4 计算变量。
-/// `demo_values = true` 时填入示范数值 6/2/6/1，否则全部从 0 开始。
+/// 给某浮窗种入默认变量（`SEED_VARIABLES` + `SEED_COMPUTED`），含默认联动。
+/// `demo_values = true` 时使用示范数值（空库初始化），否则全部从 0 开始。
 fn insert_seed_vars(
     conn: &Connection,
     overlay_id: i64,
     now: i64,
     demo_values: bool,
 ) -> Result<(), String> {
-    let v = |demo: f64| if demo_values { demo } else { 0.0 };
-    let vars = [
-        ("A1", "人机场次", v(6.0)),
-        ("A2", "真人场次", v(2.0)),
-        ("A3", "人机胜场", v(6.0)),
-        ("A4", "真人胜场", v(1.0)),
-    ];
-    for (i, (key, name, value)) in vars.iter().enumerate() {
+    // 变量 + 联动 + 计算变量一次性提交，避免补种到一半中断
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    insert_seed_variables(&tx, overlay_id, now, demo_values)?;
+    insert_seed_computed(&tx, overlay_id, now)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// 只种自定义变量（含默认联动），不动计算变量。
+/// 自增 id 插入后才知道，所以联动按 key 第二遍回填。
+fn insert_seed_variables(
+    conn: &Connection,
+    overlay_id: i64,
+    now: i64,
+    demo_values: bool,
+) -> Result<(), String> {
+    for (i, v) in SEED_VARIABLES.iter().enumerate() {
+        let value = if demo_values { v.value } else { 0.0 };
         conn.execute(
-            "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
-            params![overlay_id, key, name, value, now + i as i64],
+            "INSERT INTO variables (overlay_id, key, name, value, step, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![overlay_id, v.key, v.name, value, v.step, now + i as i64],
         )
         .map_err(|e| e.to_string())?;
     }
-    insert_seed_computed(conn, overlay_id, now)
+    for v in SEED_VARIABLES {
+        let Some(target) = v.follow else { continue };
+        conn.execute(
+            "UPDATE variables SET follow_id = (SELECT id FROM variables WHERE overlay_id = ?1 AND key = ?2)
+             WHERE overlay_id = ?3 AND key = ?4",
+            params![overlay_id, target, overlay_id, v.key],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
-/// 给某浮窗补一套种子计算变量（B1-B4，对应"战绩"场景）。
+/// 给某浮窗补一套默认计算变量（`SEED_COMPUTED`）。
 fn insert_seed_computed(conn: &Connection, overlay_id: i64, now: i64) -> Result<(), String> {
-    let seed = [
-        ("B1", "总场次", "A1 + A2", "plain", 0),
-        ("B2", "总胜场", "A3 + A4", "plain", 0),
-        ("B3", "总胜率", "B2 / B1", "percent", 1),
-        ("B4", "真实胜率", "A4 / B1", "percent", 1),
-    ];
-    for (i, (key, name, expr, format, decimals)) in seed.iter().enumerate() {
+    for (i, c) in SEED_COMPUTED.iter().enumerate() {
         conn.execute(
             "INSERT INTO computed (overlay_id, key, name, expr, format, decimals, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![overlay_id, key, name, expr, format, decimals, now + i as i64],
+            params![overlay_id, c.key, c.name, c.expr, c.format, c.decimals, now + i as i64],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -801,7 +954,7 @@ fn insert_seed_computed(conn: &Connection, overlay_id: i64, now: i64) -> Result<
 pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
     OverlayConfig {
         id,
-        name: "战绩浮窗".into(),
+        name: DEFAULT_OVERLAY_NAME.into(),
         account: String::new(),
         template: DEFAULT_TEMPLATE.into(),
         shown: true,
@@ -982,6 +1135,55 @@ mod tests {
         }
         assert_eq!(var(&store, "A3").value, 0.0);
         assert_eq!(var(&store, "A1").value, 0.0);
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn fresh_db_seeds_demo_values_and_follow_links() {
+        let (store, dir) = test_store();
+        let a1 = var(&store, "A1");
+        let a2 = var(&store, "A2");
+        let a3 = var(&store, "A3");
+        let a4 = var(&store, "A4");
+
+        // 空库初始化带示范数值
+        assert_eq!(
+            (a1.value, a2.value, a3.value, a4.value),
+            (6.0, 2.0, 6.0, 1.0)
+        );
+        // 默认联动：场次跟随对应胜场
+        assert_eq!(a1.follow_id, a3.id);
+        assert_eq!(a2.follow_id, a4.id);
+        assert_eq!(a3.follow_id, 0);
+        assert_eq!(a4.follow_id, 0);
+
+        // 联动确实生效：人机胜场 +1 → 人机场次也 +1
+        store.step_variable(1, a3.id, 1.0).unwrap();
+        assert_eq!(var(&store, "A3").value, 7.0);
+        assert_eq!(var(&store, "A1").value, 7.0);
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn deleted_variables_are_reseeded_zero_with_follow_links() {
+        let dir = test_dir();
+        let path = dir.join("test.db");
+        {
+            let store = Store::new(path.clone()).unwrap();
+            for v in store.get().overlays[0].variables.clone() {
+                store.delete_variable(1, v.id).unwrap();
+            }
+            assert!(store.get().overlays[0].variables.is_empty());
+        }
+        // 重新打开 = 模拟重启，触发补种
+        let store = Store::new(path).unwrap();
+        let a1 = var(&store, "A1");
+        assert_eq!(a1.value, 0.0, "补种不应带示范数值");
+        assert_eq!(a1.follow_id, var(&store, "A3").id);
+        // 计算变量还在，不应重复插入
+        assert_eq!(var(&store, "A2").value, 0.0);
+        assert_eq!(var(&store, "A2").follow_id, var(&store, "A4").id);
+        assert_eq!(store.get().overlays[0].computed.len(), SEED_COMPUTED.len());
         cleanup(store, dir);
     }
 }
