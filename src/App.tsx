@@ -212,7 +212,7 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     getVersion()
       .then(setVersion)
-      .catch(() => setVersion("0.1.0"));
+      .catch(() => setVersion("0.0.3"));
   }, []);
 
   return (

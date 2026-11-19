@@ -1,6 +1,6 @@
 [package]
 name = "izuna-toolbox"
-version = "0.1.0"
+version = "0.0.3"
 description = "泉奈工具箱：OBS 可捕获的悬浮字幕桌面工具"
 authors = ["you"]
 edition = "2021"
