@@ -41,7 +41,24 @@ fn portable_data_dir() -> Option<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // 单实例插件必须最先注册：再次启动程序时不再开新进程，
+    // 而是把已经运行的实例显示出来并聚焦。
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                overlay_win::sync_all_overlay_windows(app);
+            }
+        }));
+    }
+
+    builder
         .setup(|app| {
             // 1. 数据存储：SQLite 数据库放在应用数据目录
             //    - 安装版：Windows 的 %APPDATA%/com.izuna.toolbox/
@@ -55,10 +72,16 @@ pub fn run() {
 
             let store = Arc::new(Store::new(data_dir.join("izuna-toolbox.db"))?);
 
-            // 2. 浮窗"已量尺寸"集合要先于浮窗创建注册（显示门槛依赖它）
+            // 2. 先注册所有状态，再创建任何窗口。
+            //    浮窗页面一加载就会调用 get_config；若 store 到窗口创建之后才 manage，
+            //    启动瞬间会报 "state not managed for field store on command get_config"。
+            app.manage(store.clone());
             app.manage(overlay_win::MeasuredSet(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )));
+            app.manage(std::sync::Mutex::new(
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+            ));
 
             // 3. 为已有配置的浮窗创建窗口（保持隐藏，等浮窗页面量好尺寸再显示）
             for cfg in store.get().overlays {
@@ -67,11 +90,7 @@ pub fn run() {
                 }
             }
 
-            // 4. 托盘 + 拖动事件节流时间戳
-            app.manage(std::sync::Mutex::new(
-                std::time::Instant::now() - std::time::Duration::from_secs(1),
-            ));
-            app.manage(store);
+            // 4. 托盘
             tray::create_tray(app.handle())?;
 
             Ok(())

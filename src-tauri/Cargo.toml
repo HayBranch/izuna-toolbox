@@ -17,11 +17,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # 刻意保持依赖最小化（体积优先）：
-# - 不用 sysinfo / dialog / opener 等插件，只保留托盘需要的 tray-icon 特性；
+# - 只保留托盘需要的 tray-icon 特性与必需的 single-instance（防止重复启动）；
 # - rusqlite 的 `bundled` 特性把 SQLite 源码静态编译进程序，用户无需安装。
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 codegen-units = 1

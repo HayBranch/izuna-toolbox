@@ -66,7 +66,7 @@ function MainShell() {
   // 拉取配置（带超时）：首次加载与错误态「重试」共用。
   // 超时是关键——若 IPC 永久挂起（数据库锁死、命令 panic 等），
   // 不至于永远停在"正在加载"，而是进错误态让用户能看到原因并重试。
-  const loadConfig = () => {
+  const loadConfig = (attempt = 0) => {
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("加载超时（10s）")), 10_000);
@@ -80,10 +80,17 @@ function MainShell() {
       })
       .catch((e) => {
         clearTimeout(timer);
+        const message = String(e);
+        // 启动瞬间状态可能还没注册完（Rust setup 竞态），这类错误自动重试；
+        // 真正的数据库/权限错误仍直接显示，不无限重试。
+        if (attempt < 3 && /state\s+not\s+managed/i.test(message)) {
+          setTimeout(() => loadConfig(attempt + 1), 150 * (attempt + 1));
+          return;
+        }
         // 失败必须让人看见：否则 config 一直是 null，界面停在"正在加载…"，
         // 看起来像卡死，其实是 IPC 一次性失败（或挂起后被超时打断）。
         console.warn(e);
-        setConfigError(String(e));
+        setConfigError(message);
       });
   };
 
@@ -204,7 +211,7 @@ function MainShell() {
               <p className="mt-1 break-all font-mono text-xs text-rose-400">{configError}</p>
               <button
                 type="button"
-                onClick={loadConfig}
+                onClick={() => loadConfig()}
                 className="mt-3 rounded-lg border border-rose-500/50 px-3 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-500/20"
               >
                 重试
