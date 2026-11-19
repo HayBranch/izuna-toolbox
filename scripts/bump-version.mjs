@@ -19,9 +19,12 @@ if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
   process.exit(1);
 }
 
+// Windows 上 Node 出于安全加固不允许直接 spawn `.cmd`，必须走 shell。
+// 走 shell 时把版本号这类参数一起放进命令串，避免 args 被错误拼接。
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 execFileSync(npm, ["version", version, "--no-git-tag-version"], {
   stdio: "inherit",
+  shell: process.platform === "win32",
 });
 
 console.log(`\n✅ 版本号已改为 ${version}`);
