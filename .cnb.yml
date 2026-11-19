@@ -1,0 +1,104 @@
+# 打 tag（v*）时发布
+v*:
+  tag_push:
+    - name: publish-tauri
+      # Windows 目标：CNB 默认构建节点为 Linux，
+      # 交叉编译 Windows 产物建议自行准备带 NSIS/cross 工具链的镜像
+      docker:
+        image: node:20
+      env:
+        # Rust / Tauri 缓存目录（可选）
+        CARGO_HOME: /workspace/.cargo
+        RUSTUP_HOME: /workspace/.rustup
+      stages:
+        - name: install frontend dependencies
+          script: |
+            npm ci
+
+        - name: install Rust stable
+          script: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            . "$HOME/.cargo/env"
+            rustc -V
+            cargo -V
+
+        - name: build the app
+          script: |
+            . "$HOME/.cargo/env"
+            npm run tauri build
+          # 说明：tauri-action 属于 GitHub 专属 Action，CNB 无对应插件，
+          # 此处改为直接调用 tauri CLI 构建；发布动作由后续 cnb:release 承担
+
+        - name: package portable zip
+          script: |
+            node scripts/package-portable.mjs
+
+        - name: upload portable artifact
+          type: cnb:artifact
+          options:
+            # 仅上传、不落 Release
+            path:
+              - dist-portable/*.zip
+            # 找不到文件时任务失败（等价 if-no-files-found: error）
+            failIfNotFound: true
+
+        - name: upload installer artifact
+          type: cnb:artifact
+          options:
+            path:
+              - src-tauri/target/release/bundle/nsis/*.exe
+            failIfNotFound: true
+
+        - name: upload portable to release
+          type: cnb:release
+          options:
+            # 等价 releaseDraft: true / prerelease: false
+            tag: $CNB_BRANCH          # tag 事件下 CNB_BRANCH 即 Tag 名
+            name: "Izuna Toolbox $CNB_BRANCH"
+            body: "See the assets to download."
+            draft: true
+            prerelease: false
+            files:
+              - dist-portable/*.zip
+              - src-tauri/target/release/bundle/nsis/*.exe
+          allowFailure: false
+
+# 手动触发（等价 workflow_dispatch）：只产出制品，不创建 Release
+$:
+  web_trigger_publish:
+    - name: publish-tauri-manual
+      docker:
+        image: node:20
+      stages:
+        - name: install frontend dependencies
+          script: |
+            npm ci
+
+        - name: install Rust stable
+          script: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            . "$HOME/.cargo/env"
+            rustc -V
+
+        - name: build the app
+          script: |
+            . "$HOME/.cargo/env"
+            npm run tauri build
+
+        - name: package portable zip
+          script: |
+            node scripts/package-portable.mjs
+
+        - name: upload portable artifact
+          type: cnb:artifact
+          options:
+            path:
+              - dist-portable/*.zip
+            failIfNotFound: true
+
+        - name: upload installer artifact
+          type: cnb:artifact
+          options:
+            path:
+              - src-tauri/target/release/bundle/nsis/*.exe
+            failIfNotFound: true
