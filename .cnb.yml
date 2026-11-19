@@ -43,11 +43,13 @@ v*:
             . "$CARGO_HOME/env"
             rustup target add x86_64-pc-windows-gnu
             apt-get update
-            apt-get install -y --no-install-recommends mingw-w64
+            apt-get install -y --no-install-recommends mingw-w64 zip
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
 
         - name: package portable zip
           script: |
+            cp src-tauri/target/x86_64-pc-windows-gnu/release/izuna-toolbox.exe \
+              src-tauri/target/release/izuna-toolbox.exe
             node scripts/package-portable.mjs
 
         - name: upload portable artifact
@@ -117,11 +119,13 @@ $:
             . "$CARGO_HOME/env"
             rustup target add x86_64-pc-windows-gnu
             apt-get update
-            apt-get install -y --no-install-recommends mingw-w64
+            apt-get install -y --no-install-recommends mingw-w64 zip
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
 
         - name: package portable zip
           script: |
+            cp src-tauri/target/x86_64-pc-windows-gnu/release/izuna-toolbox.exe \
+              src-tauri/target/release/izuna-toolbox.exe
             node scripts/package-portable.mjs
 
         - name: upload portable artifact
