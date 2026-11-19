@@ -37,7 +37,7 @@ jobs:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Izuna Toolbox {0}', github.ref_name) || '' }}
           releaseBody: 'See the assets to download.'
-          releaseDraft: true
+          # releaseDraft: true # 是否草稿
           prerelease: false
 
       - name: package portable zip
