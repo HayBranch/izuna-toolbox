@@ -8,13 +8,16 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { getConfig, openUrl, subscribeConfig } from "./api";
+import { getConfig, openUrl, setMainAlwaysOnTop, subscribeConfig } from "./api";
 import type { AppConfig, MovedEvent } from "./types";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
+import izunaIcon from "./assets/izuna-icon.png";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 const isOverlay = isTauri && getCurrentWindow().label.startsWith("overlay-");
+/** 主窗口置顶偏好（localStorage 跟随 WebView 用户目录，重开窗口后恢复） */
+const PIN_STORAGE_KEY = "izuna.main.alwaysOnTop";
 
 export default function App() {
   if (!isTauri) {
@@ -32,6 +35,32 @@ export default function App() {
 function MainShell() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [pinned, setPinned] = useState(false);
+
+  // 重开应用时恢复上次的「主窗口置顶」选择
+  useEffect(() => {
+    if (localStorage.getItem(PIN_STORAGE_KEY) !== "1") return;
+    let alive = true;
+    setMainAlwaysOnTop(true)
+      .then((value) => {
+        if (alive) setPinned(value);
+      })
+      .catch(console.warn);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const togglePinned = async () => {
+    const next = !pinned;
+    try {
+      await setMainAlwaysOnTop(next);
+      setPinned(next);
+      localStorage.setItem(PIN_STORAGE_KEY, next ? "1" : "0");
+    } catch (e) {
+      console.warn(e);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -82,8 +111,13 @@ function MainShell() {
       {/* 侧边导航：只有一个功能，固定高亮，不需要切换 */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-slate-800/80 bg-slate-900/60">
         <div className="flex items-center gap-3 px-5 pt-6 pb-5">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 text-lg shadow-lg shadow-indigo-500/30">
-            🥷
+          <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-slate-950 shadow-lg shadow-indigo-500/20 ring-1 ring-slate-700/70">
+            <img
+              src={izunaIcon}
+              alt="泉奈工具箱图标"
+              draggable={false}
+              className="h-full w-full object-cover"
+            />
           </div>
           <div>
             <h1 className="font-semibold text-slate-100">泉奈工具箱</h1>
@@ -117,12 +151,28 @@ function MainShell() {
 
       {/* 内容区：一套浮窗一张卡，所有配置都在这一页 */}
       <main className="min-w-0 flex-1 overflow-y-auto p-8">
-        <header className="mb-6">
-          <h2 className="text-xl font-semibold text-slate-100">悬浮字幕</h2>
-          <p className="mt-1 text-sm text-slate-500">
-            可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式），
-            所有配置都在下方每张卡片里。
-          </p>
+        <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-100">悬浮字幕</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式），
+              所有配置都在下方每张卡片里。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void togglePinned()}
+            aria-pressed={pinned}
+            title={pinned ? "取消主窗口置顶" : "让主窗口始终显示在最前面"}
+            className={`flex shrink-0 items-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-medium transition ${
+              pinned
+                ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
+                : "border-slate-700 bg-slate-900/60 text-slate-300 hover:border-indigo-500 hover:text-indigo-300"
+            }`}
+          >
+            <PinIcon filled={pinned} />
+            {pinned ? "已置顶" : "窗口置顶"}
+          </button>
         </header>
 
         {!config ? (
@@ -134,6 +184,25 @@ function MainShell() {
 
       {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
     </div>
+  );
+}
+
+/** 主窗口置顶按钮的图钉图标（不引入图标库，沿用内联 SVG） */
+function PinIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6Z" />
+      <path d="M12 14v7" />
+    </svg>
   );
 }
 
@@ -156,8 +225,13 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-400 to-indigo-500 text-2xl shadow-lg shadow-indigo-500/30">
-            🥷
+          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-slate-950 shadow-lg shadow-indigo-500/20 ring-1 ring-slate-700/70">
+            <img
+              src={izunaIcon}
+              alt="泉奈工具箱图标"
+              draggable={false}
+              className="h-full w-full object-cover"
+            />
           </div>
           <div>
             <h3 className="text-lg font-semibold text-slate-100">泉奈工具箱</h3>
@@ -177,11 +251,11 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
             仓库：{" "}
             <button
               type="button"
-              onClick={() => openUrl("https://gitee.com/HayBranch/izuna-toolbox").catch(console.warn)}
+              onClick={() => openUrl("https://github.com/HayBranch/izuna-toolbox").catch(console.warn)}
               title="在浏览器中打开仓库"
               className="break-all font-mono text-sky-400 underline decoration-sky-500/40 underline-offset-2 transition hover:text-sky-300 hover:decoration-sky-400"
             >
-              https://gitee.com/HayBranch/izuna-toolbox
+              https://github.com/HayBranch/izuna-toolbox
             </button>
           </p>
           <p className="text-slate-500">

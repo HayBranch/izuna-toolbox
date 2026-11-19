@@ -102,5 +102,9 @@ export const deleteComputed = (overlayId: number, id: number) =>
 
 // ---------- 杂项 ----------
 
+/** 主窗口置顶开关（主界面右上角按钮，只影响主窗口，不影响浮窗） */
+export const setMainAlwaysOnTop = (value: boolean) =>
+  invoke<boolean>("set_main_always_on_top", { value });
+
 /** 用系统默认浏览器打开 http(s) 链接（「关于」里的仓库地址） */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });

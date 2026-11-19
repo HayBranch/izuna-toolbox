@@ -11,7 +11,7 @@
 把「打了多少场、胜率多少」这类战绩数据做成一枚可被直播软件捕获的悬浮字幕，
 所有数据保存在本地 SQLite 数据库里，不联网、不上传。
 
-- 仓库：<https://gitee.com/HayBranch/izuna-toolbox>
+- 仓库：<https://github.com/HayBranch/izuna-toolbox>
 - 许可证：[MIT](./LICENSE)
 
 ## 功能
@@ -67,8 +67,10 @@
 
 ### 💾 SQLite 持久化
 
-- 数据保存在 `%APPDATA%/com.izuna.toolbox/izuna-toolbox.db`
+- **安装版**（NSIS 安装包）：数据保存在 `%APPDATA%/com.izuna.toolbox/izuna-toolbox.db`
   （SQLite，`rusqlite` bundled 静态编译，无需安装任何东西）；
+- **便携版**：exe 同目录存在 `portable.flag` 时，数据保存在同目录的 `data/izuna-toolbox.db`，
+  整个文件夹可以拷到 U 盘或别的电脑，数据跟着走；
 - 表结构：`overlays`（浮窗队列，含每套自己的账号）、
   `variables` / `computed`（套内变量，按 `overlay_id` 归属）；
 - 每次变更即提交，退出无需保存；删除数据库文件即恢复出厂。
@@ -96,6 +98,7 @@
 npm install        # 装前端依赖（一次）
 npm run tauri dev  # 开发模式：前端热更新 + Rust 自动重编
 npm run bundle     # 打包：release exe + NSIS 安装包
+npm run bundle:portable  # 打包：便携版目录 + zip（dist-portable/）
 ```
 
 产物位置：
@@ -104,6 +107,13 @@ npm run bundle     # 打包：release exe + NSIS 安装包
 |---|---|
 | 绿色单文件 exe | `src-tauri/target/release/izuna-toolbox.exe` |
 | NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` |
+| 便携版目录 | `dist-portable/Izuna-Toolbox-<版本>/` |
+| 便携版 zip | `dist-portable/Izuna-Toolbox-<版本>-portable-x64.zip` |
+
+便携版解压后双击 `Izuna Toolbox.exe` 即可运行，数据写在同目录的 `data/`；
+`portable.flag` 是便携模式标记，删掉它就回到安装版的 `%APPDATA%` 存储方式。
+GitHub Actions 打 tag（`v*`）时会把 NSIS 安装包和便携版 zip 一起传到 Release，
+手动触发 workflow 时也可以在 Actions Artifact 里下载。
 
 ## 目录结构
 

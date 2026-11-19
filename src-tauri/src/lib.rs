@@ -13,18 +13,44 @@ mod overlay_win;
 mod store;
 mod tray;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::Manager;
 use store::Store;
 
+/// 便携模式标记文件名：放在 exe 同目录即可启用便携数据目录。
+const PORTABLE_FLAG: &str = "portable.flag";
+/// 便携模式的数据文件夹名（与 exe 同目录）。
+const PORTABLE_DATA_DIR: &str = "data";
+
+/// 解析持久化数据目录：
+/// - 便携版（exe 同目录存在 `portable.flag`）：使用 exe 同目录的 `data/`，
+///   整个文件夹可随程序一起拷贝走；
+/// - 安装版（NSIS 安装后没有该标记）：保持原样，使用系统应用数据目录
+///   `%APPDATA%/com.izuna.toolbox/`。
+fn portable_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    if dir.join(PORTABLE_FLAG).is_file() {
+        Some(dir.join(PORTABLE_DATA_DIR))
+    } else {
+        None
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // 1. 数据存储：SQLite 数据库放在应用数据目录（Windows: %APPDATA%/com.izuna.toolbox/）
+            // 1. 数据存储：SQLite 数据库放在应用数据目录
+            //    - 安装版：Windows 的 %APPDATA%/com.izuna.toolbox/
+            //    - 便携版：exe 同目录的 data/（由同目录的 portable.flag 标记）
             //    首次运行建表并种入示例数据。
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = match portable_data_dir() {
+                Some(dir) => dir,
+                None => app.path().app_data_dir()?,
+            };
             std::fs::create_dir_all(&data_dir)?;
 
             let store = Arc::new(Store::new(data_dir.join("izuna-toolbox.db"))?);
@@ -129,6 +155,7 @@ pub fn run() {
             commands::set_overlay_click_through,
             commands::delete_overlay,
             commands::set_overlay_size,
+            commands::set_main_always_on_top,
             commands::open_url
         ])
         .run(tauri::generate_context!())

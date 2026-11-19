@@ -9,8 +9,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "icon": "node scripts/gen-icon.mjs && tauri icon scripts/app-icon.png",
-    "bundle": "tauri build --bundles nsis"
+    "icon": "tauri icon scripts/app-icon.png",
+    "bundle": "tauri build --bundles nsis",
+    "bundle:portable": "tauri build --no-bundle && node scripts/package-portable.mjs",
+    "portable": "node scripts/package-portable.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

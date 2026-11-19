@@ -338,6 +338,19 @@ fn sync_and_changed(
     changed(app, store)
 }
 
+/// 设置主窗口是否置顶（主界面右上角的「窗口置顶」按钮）。
+/// 只允许主窗口调用，浮窗的置顶仍走 set_overlay_always_top。
+#[tauri::command]
+pub fn set_main_always_on_top(window: WebviewWindow, value: bool) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("只有主窗口可以设置窗口置顶".into());
+    }
+    window
+        .set_always_on_top(value)
+        .map_err(|e| format!("设置主窗口置顶失败：{e}"))?;
+    Ok(value)
+}
+
 /// 用系统默认浏览器打开 http(s) 链接（供「关于」里的仓库地址点击）。
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
