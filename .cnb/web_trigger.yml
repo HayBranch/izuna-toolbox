@@ -1,0 +1,5 @@
+branch:
+  - buttons:
+      - name: 手动构建
+        description: 构建便携版并把制品传到当前 commit
+        event: web_trigger_publish
