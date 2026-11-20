@@ -47,10 +47,18 @@ v*:
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
             # windows-gnu 产物动态依赖 WebView2Loader.dll，必须和 exe 一起分发；
             # MSVC 原生构建（GitHub Actions）把 loader 静态链接进 exe，则不需要。
-            # webview2-com-sys 的 build.rs 已把 SDK 的 loader 放进 OUT_DIR/x64/。
-            LOADER=$(find src-tauri/target/x86_64-pc-windows-gnu/release/build \
-              -path '*webview2-com-sys-*/out/x64/WebView2Loader.dll' -print -quit)
-            test -n "$LOADER" || { echo '未找到 WebView2Loader.dll'; exit 1; }
+            # DLL 随 webview2-com-sys crate 发布在 <crate>/x64/，编译后还会被复制进
+            # OUT_DIR/x64/；两处都搜一遍，限定 x64 以免误取 arm64/x86 版本。
+            LOADER=""
+            for root in "$CARGO_HOME/registry/src" src-tauri/target; do
+              if [ -d "$root" ]; then
+                found=$(find "$root" -path '*/x64/WebView2Loader.dll' -print -quit 2>/dev/null || true)
+                if [ -n "$found" ]; then LOADER="$found"; break; fi
+              fi
+            done
+            if [ -z "$LOADER" ]; then
+              echo '未找到 WebView2Loader.dll'; exit 1
+            fi
             cp "$LOADER" src-tauri/target/release/WebView2Loader.dll
 
         - name: package portable zip
@@ -122,10 +130,18 @@ $:
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
             # windows-gnu 产物动态依赖 WebView2Loader.dll，必须和 exe 一起分发；
             # MSVC 原生构建（GitHub Actions）把 loader 静态链接进 exe，则不需要。
-            # webview2-com-sys 的 build.rs 已把 SDK 的 loader 放进 OUT_DIR/x64/。
-            LOADER=$(find src-tauri/target/x86_64-pc-windows-gnu/release/build \
-              -path '*webview2-com-sys-*/out/x64/WebView2Loader.dll' -print -quit)
-            test -n "$LOADER" || { echo '未找到 WebView2Loader.dll'; exit 1; }
+            # DLL 随 webview2-com-sys crate 发布在 <crate>/x64/，编译后还会被复制进
+            # OUT_DIR/x64/；两处都搜一遍，限定 x64 以免误取 arm64/x86 版本。
+            LOADER=""
+            for root in "$CARGO_HOME/registry/src" src-tauri/target; do
+              if [ -d "$root" ]; then
+                found=$(find "$root" -path '*/x64/WebView2Loader.dll' -print -quit 2>/dev/null || true)
+                if [ -n "$found" ]; then LOADER="$found"; break; fi
+              fi
+            done
+            if [ -z "$LOADER" ]; then
+              echo '未找到 WebView2Loader.dll'; exit 1
+            fi
             cp "$LOADER" src-tauri/target/release/WebView2Loader.dll
 
         - name: package portable zip
@@ -135,9 +151,9 @@ $:
             node scripts/package-portable.mjs
 
         # 手动触发不创建 Release，制品作为 commit 附件保留。
+        # Linux 节点产不出 Windows NSIS 安装包，这里只传便携 zip。
         - name: upload build artifacts
           image: cnbcool/attachments:latest
           settings:
             attachments:
               - dist-portable/*.zip
-              - src-tauri/target/release/bundle/nsis/*.exe
