@@ -5,6 +5,7 @@
  * 2. 组装 `dist-portable/Izuna-Toolbox-<版本>/`：
  *    - `Izuna Toolbox.exe` 主程序
  *    - `portable.flag`    便携模式标记（Rust 侧据此把数据写到 exe 同目录的 data/）
+ *    - `WebView2Loader.dll` 仅 windows-gnu 交叉编译产物需要（见下方说明）
  *    - `data/`            SQLite 数据库目录（首次运行自动建库）
  *    - `README.txt`       使用说明
  * 3. 用系统自带能力压缩成 `dist-portable/Izuna-Toolbox-<版本>-portable-x64.zip`。
@@ -21,6 +22,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -49,6 +51,41 @@ rmSync(zipPath, { force: true });
 mkdirSync(path.join(appDir, "data"), { recursive: true });
 
 copyFileSync(exePath, path.join(appDir, "Izuna Toolbox.exe"));
+
+// webview2-com-sys 在 MSVC 目标上把 WebView2Loader 静态链接进 exe（GitHub Actions
+// 的 windows-latest 属于这种），但在 x86_64-pc-windows-gnu 上只链接导入库，运行时
+// 要求 WebView2Loader.dll 与 exe 同目录（CNB 的 Linux 交叉编译属于这种）。
+// 用 PE 导入表里的 DLL 名判断是否需要附带，避免给 MSVC 产物塞多余文件。
+const needsLoader = readFileSync(exePath).includes(Buffer.from("WebView2Loader.dll"));
+if (needsLoader) {
+  const candidates = [
+    process.env.WEBVIEW2_LOADER_DLL,
+    path.join(path.dirname(exePath), "WebView2Loader.dll"),
+  ].filter(Boolean);
+
+  // webview2-com-sys 的 build.rs 会把 SDK 的 loader 复制进 OUT_DIR/<arch>/
+  const buildRoots = [
+    path.join(root, "src-tauri", "target", "x86_64-pc-windows-gnu", "release", "build"),
+    path.join(root, "src-tauri", "target", "release", "build"),
+  ];
+  for (const buildRoot of buildRoots) {
+    if (!existsSync(buildRoot)) continue;
+    for (const dir of readdirSync(buildRoot)) {
+      if (dir.startsWith("webview2-com-sys-")) {
+        candidates.push(path.join(buildRoot, dir, "out", "x64", "WebView2Loader.dll"));
+      }
+    }
+  }
+
+  const loaderDll = candidates.find((p) => existsSync(p));
+  if (!loaderDll) {
+    console.error("此 exe 动态依赖 WebView2Loader.dll，但未找到该 DLL。");
+    console.error("可设置环境变量 WEBVIEW2_LOADER_DLL 指向 WebView2 SDK 中的 x64/WebView2Loader.dll。");
+    process.exit(1);
+  }
+  copyFileSync(loaderDll, path.join(appDir, "WebView2Loader.dll"));
+  console.log(`附带 WebView2Loader.dll：${loaderDll}`);
+}
 
 // 便携模式标记：只要它和 exe 同目录，程序就把数据库放到同目录的 data/ 下。
 writeFileSync(
@@ -79,6 +116,13 @@ writeFileSync(
     "",
     "4. 安装版（NSIS 安装包）不受影响，仍然使用系统 %APPDATA% 目录。",
     "",
+    ...(needsLoader
+      ? [
+          "5. 请不要删除 WebView2Loader.dll：本包是 MinGW 交叉编译产物，",
+          "   运行时需要它和 exe 放在同一目录（安装版/Microsoft 原生构建版不需要）。",
+          "",
+        ]
+      : []),
   ].join("\r\n"),
   "utf8",
 );

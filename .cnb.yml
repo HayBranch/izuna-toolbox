@@ -45,6 +45,13 @@ v*:
             apt-get update
             apt-get install -y --no-install-recommends mingw-w64 zip
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
+            # windows-gnu 产物动态依赖 WebView2Loader.dll，必须和 exe 一起分发；
+            # MSVC 原生构建（GitHub Actions）把 loader 静态链接进 exe，则不需要。
+            # webview2-com-sys 的 build.rs 已把 SDK 的 loader 放进 OUT_DIR/x64/。
+            LOADER=$(find src-tauri/target/x86_64-pc-windows-gnu/release/build \
+              -path '*webview2-com-sys-*/out/x64/WebView2Loader.dll' -print -quit)
+            test -n "$LOADER" || { echo '未找到 WebView2Loader.dll'; exit 1; }
+            cp "$LOADER" src-tauri/target/release/WebView2Loader.dll
 
         - name: package portable zip
           script: |
@@ -109,6 +116,13 @@ $:
             apt-get update
             apt-get install -y --no-install-recommends mingw-w64 zip
             npm run tauri build -- --target x86_64-pc-windows-gnu --no-bundle
+            # windows-gnu 产物动态依赖 WebView2Loader.dll，必须和 exe 一起分发；
+            # MSVC 原生构建（GitHub Actions）把 loader 静态链接进 exe，则不需要。
+            # webview2-com-sys 的 build.rs 已把 SDK 的 loader 放进 OUT_DIR/x64/。
+            LOADER=$(find src-tauri/target/x86_64-pc-windows-gnu/release/build \
+              -path '*webview2-com-sys-*/out/x64/WebView2Loader.dll' -print -quit)
+            test -n "$LOADER" || { echo '未找到 WebView2Loader.dll'; exit 1; }
+            cp "$LOADER" src-tauri/target/release/WebView2Loader.dll
 
         - name: package portable zip
           script: |
