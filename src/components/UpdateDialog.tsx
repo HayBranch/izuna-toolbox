@@ -292,7 +292,8 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
             <div>
               <p className="font-medium text-emerald-400">✓ 下载完成</p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                点击「立即安装」将启动安装向导并退出本程序，安装完成后请重新打开。
+                点击「立即安装」将原地替换安装并退出本程序（桌面图标及其位置保持不变），
+                安装进度窗口会自动关闭，完成后请重新打开。
               </p>
             </div>
           )}

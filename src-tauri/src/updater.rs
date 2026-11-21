@@ -241,7 +241,12 @@ fn install_update_impl(app: AppHandle, path: String) -> Result<(), String> {
         c.arg("/i").arg(&canonical).arg("/passive").arg("/norestart");
         c
     } else {
-        std::process::Command::new(&canonical)
+        // NSIS 用 Tauri 模板内置的更新模式参数：/UPDATE 原地覆盖安装——
+        // 不运行旧版卸载器、不删除/重建桌面与开始菜单快捷方式（图标位置不变），
+        // 注册表版本信息就地更新；/P 被动模式只显示进度条页并自动关闭，不弹向导。
+        let mut c = std::process::Command::new(&canonical);
+        c.arg("/UPDATE").arg("/P");
+        c
     };
     // 脱离本进程：app.exit(0) 之后安装器仍能继续运行。
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
