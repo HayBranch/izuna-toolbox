@@ -71,8 +71,9 @@ function MainShell() {
     if (themeMode !== "auto") return;
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
-      applyThemeMode("auto");
-      syncWindowTheme("auto");
+      const dark = applyThemeMode("auto");
+      // 系统外观变了：显式下发当前实际主题，确保原生标题栏跟着刷新
+      syncWindowTheme(dark ? "dark" : "light");
     };
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
@@ -233,39 +234,39 @@ function MainShell() {
             <br />
             浮窗继续悬浮，可被直播软件捕获。
           </p>
-          <button
-            onClick={() => setAboutOpen(true)}
-            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:border-slate-600 dark:hover:text-slate-300"
-          >
-            ℹ️ 关于
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void togglePinned()}
+              aria-pressed={pinned}
+              title={pinned ? "取消主窗口置顶" : "让主窗口始终显示在最前面"}
+              className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${
+                pinned
+                  ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
+                  : "border-slate-200 text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-800 dark:text-slate-500 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+              }`}
+            >
+              <PinIcon filled={pinned} />
+              {pinned ? "已置顶" : "置顶窗口"}
+            </button>
+            <button
+              onClick={() => setAboutOpen(true)}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:border-slate-600 dark:hover:text-slate-300"
+            >
+              ℹ️ 关于
+            </button>
+          </div>
         </footer>
       </aside>
 
       {/* 内容区：列表 → 点开一张卡进入该浮窗的全部配置 */}
       <main className="min-w-0 flex-1 overflow-y-auto p-8">
-        <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">悬浮字幕</h2>
-            <p className="mt-1 text-sm text-slate-500">
-              可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式）。
-              先在列表里看基本信息，点进去配置详情。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void togglePinned()}
-            aria-pressed={pinned}
-            title={pinned ? "取消主窗口置顶" : "让主窗口始终显示在最前面"}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-medium transition ${
-              pinned
-                ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
-                : "border-slate-300 bg-white/70 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
-            }`}
-          >
-            <PinIcon filled={pinned} />
-            {pinned ? "已置顶" : "窗口置顶"}
-          </button>
+        <header className="mb-6">
+          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">悬浮字幕</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式）。
+            先在列表里看基本信息，点进去配置详情。
+          </p>
         </header>
 
         {!config ? (
