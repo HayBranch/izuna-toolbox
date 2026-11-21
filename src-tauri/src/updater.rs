@@ -112,7 +112,8 @@ async fn download_update_impl(
         .unwrap_or("")
         .to_string();
     let lower = name.to_ascii_lowercase();
-    if name.is_empty() || name != file_name || !(lower.ends_with(".exe") || lower.ends_with(".msi")) {
+    if name.is_empty() || name != file_name || !(lower.ends_with(".exe") || lower.ends_with(".msi"))
+    {
         return Err("安装包文件名不合法".into());
     }
 
@@ -148,7 +149,9 @@ async fn download_update_impl(
             // 超时切片只是回头查一次取消标志，不算失败，继续等同一个请求
             Ok(r) => {
                 let r = r.map_err(|e| format!("连接 GitHub 失败：{e}"))?;
-                let r = r.error_for_status().map_err(|e| format!("下载被拒绝：{e}"))?;
+                let r = r
+                    .error_for_status()
+                    .map_err(|e| format!("下载被拒绝：{e}"))?;
                 break r;
             }
             Err(_) => continue,
@@ -238,7 +241,10 @@ fn install_update_impl(app: AppHandle, path: String) -> Result<(), String> {
 
     let mut cmd = if ext == "msi" {
         let mut c = std::process::Command::new("msiexec");
-        c.arg("/i").arg(&canonical).arg("/passive").arg("/norestart");
+        c.arg("/i")
+            .arg(&canonical)
+            .arg("/passive")
+            .arg("/norestart");
         c
     } else {
         // NSIS 用 Tauri 模板内置的更新模式参数：/UPDATE 原地覆盖安装——
@@ -249,12 +255,66 @@ fn install_update_impl(app: AppHandle, path: String) -> Result<(), String> {
         c
     };
     // 脱离本进程：app.exit(0) 之后安装器仍能继续运行。
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+    let installer = cmd
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| format!("启动安装器失败：{e}"))?;
+    let installer_pid = installer.id();
+
+    // 装完自动重启：Tauri 的 NSIS 模板只有在「完成页」才勾选运行程序，而被动模式
+    // (/P) 会跳过完成页并 SetAutoClose，MSI 更是没有任何启动动作，所以必须自己拉起。
+    // 做法是先挂一个脱离进程的 PowerShell 看门程序，它等旧进程退出、新 exe 文件
+    // 解锁（安装替换完成）后再启动，避免和正在退出的旧实例抢单实例锁。
+    let current_exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !current_exe.is_empty() {
+        let mut waiter = relaunch_waiter_command(installer_pid, &current_exe);
+        let _ = waiter
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            .spawn();
+    }
 
     app.exit(0);
     Ok(())
+}
+
+/// 生成一个 PowerShell 看门进程：等安装器退出 + 目标 exe 文件解锁后再启动它。
+///
+/// 判定「装完了」不能只靠安装器 PID（msiexec 会先派生提权子进程再退出），
+/// 所以额外轮询目标 exe 是否能独占打开——旧实例在跑、或安装器正在替换文件时
+/// 都会失败，只有文件真正就绪才启动。超时则放弃等待（用户手动打开即可）。
+#[cfg(windows)]
+fn relaunch_waiter_command(installer_pid: u32, exe_path: &str) -> std::process::Command {
+    let quoted = exe_path.replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue';\
+         Wait-Process -Id {installer_pid} -Timeout 600;\
+         $sw=[Diagnostics.Stopwatch]::StartNew();\
+         while($sw.Elapsed.TotalSeconds -lt 120){{\
+           try{{\
+             $f=[IO.File]::Open('{quoted}','Open','ReadWrite','None');\
+             $f.Close(); break\
+           }}catch{{}}\
+           Start-Sleep -Milliseconds 500\
+         }};\
+         Start-Process -FilePath '{quoted}'"
+    );
+    let mut c = std::process::Command::new("powershell.exe");
+    c.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        &script,
+    ]);
+    // 工作目录别留在安装目录里：进程的 cwd 会占住目录，可能妨碍安装器替换文件。
+    c.current_dir(std::env::temp_dir());
+    c
 }
 
 #[cfg(not(windows))]
