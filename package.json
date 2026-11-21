@@ -1,7 +1,7 @@
 {
   "name": "izuna-toolbox",
   "private": true,
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "泉奈工具箱 —— 带 OBS 可捕获悬浮字幕的轻量 Tauri 桌面工具",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "icon": "tauri icon scripts/app-icon.png",
-    "bundle": "tauri build --bundles nsis",
+    "bundle": "tauri build --bundles nsis,msi",
     "bundle:portable": "tauri build --no-bundle && node scripts/package-portable.mjs",
     "portable": "node scripts/package-portable.mjs",
     "bump": "node scripts/bump-version.mjs"

@@ -12,6 +12,7 @@ mod commands;
 mod overlay_win;
 mod store;
 mod tray;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,6 +83,8 @@ pub fn run() {
             app.manage(std::sync::Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(1),
             ));
+            // 自动更新的取消标志（download_update / cancel_update 共用）
+            app.manage(updater::UpdateState::default());
 
             // 3. 为已有配置的浮窗创建窗口（保持隐藏，等浮窗页面量好尺寸再显示）
             for cfg in store.get().overlays {
@@ -175,7 +178,10 @@ pub fn run() {
             commands::delete_overlay,
             commands::set_overlay_size,
             commands::set_main_always_on_top,
-            commands::open_url
+            commands::open_url,
+            updater::download_update,
+            updater::cancel_update,
+            updater::install_update
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");

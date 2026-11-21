@@ -9,7 +9,7 @@
 
 泉奈工具箱（Izuna Toolbox）是一个免费的开源小工具，为直播玩家打造：
 把「打了多少场、胜率多少」这类战绩数据做成一枚可被直播软件捕获的悬浮字幕，
-所有数据保存在本地 SQLite 数据库里，不联网、不上传。
+所有数据保存在本地 SQLite 数据库里、不会上传；仅「自动更新」检查版本时会连接 GitHub。
 
 - 仓库：<https://github.com/HayBranch/izuna-toolbox>
 - 许可证：[MIT](./LICENSE)
@@ -85,13 +85,35 @@
 
 | 措施 | 位置 | 效果 |
 |---|---|---|
-| 只打 NSIS 安装包 | `tauri.conf.json` → `bundle.targets: ["nsis"]` | 不再产出 MSI/WiX，体积减半 |
+| 主安装包只打 NSIS | `tauri.conf.json` → `bundle.targets: ["nsis"]` | 主发布链路最稳、体积最小；MSI 作为额外产物单独 best-effort 构建（见下） |
 | 跳过 WebView2 安装 | `bundle.windows.webviewInstallMode.type: "skip"` | Win10/11 都自带 WebView2，不再打包引导器 |
 | SQLite 静态编译 | `Cargo.toml` → `rusqlite` (`bundled`) | 数据库直接编进 exe，约 +1MB，免安装免服务 |
 | release 全套瘦身 | `Cargo.toml` → `lto + strip + opt-level "s" + panic abort` | exe 最小化 |
 
+**关于 MSI**：`npm run bundle`（`--bundles nsis,msi`）在本地 Windows 会一并产出 MSI；
+GitHub Actions 里则用单独的 best-effort 步骤 `tauri build --bundles msi` 尝试构建并上传，
+**失败也不影响 NSIS 主发布**。原因是 WiX v3 在 CI runner 上常因 `light.exe` 被
+Defender 拦截而失败、工具链已归档，所以「当次能不能出 msi」要看 CI 运行结果。
+
 > 兼容性兜底：如果将来要给一台**没有 WebView2** 的旧机器用，把 `webviewInstallMode`
 > 改回 `{"type": "downloadBootstrapper"}` 重打即可。
+
+## 自动更新（GitHub Releases）
+
+v0.0.7 起支持从本仓库的 GitHub Release 检查并更新：
+
+- 「关于」弹窗点 **检查更新**：请求 GitHub `releases/latest`，比对版本号后列出
+  可下载的安装包（NSIS 安装包 / MSI）与更新说明，可下载后一键安装；
+- 启动时也会**静默**检查（可关）：开关在更新弹窗底部「启动时自动检查更新」，
+  12 小时内不重复请求，避免触发 GitHub 未认证接口 60 次/小时限额；
+- 国内 GitHub 可能连不上：检查自带 **8 秒超时**、失败不卡界面；下载每 15 秒
+  无数据即判超时，且随时可点 **取消下载** 中止并清理半成品；
+- 下载在 Rust 侧完成（release 资源跳转的 CDN 不允许前端跨域读取），完成后点
+  「立即安装并退出」会启动安装向导并退出本程序，装完重新打开即可；
+- 连不上时也能直接点「打开发布页」用浏览器手动下载。
+
+开关与检查时间戳存在 WebView 的 `localStorage`（与「窗口置顶」偏好一致），不写入
+SQLite；自动更新主要面向 Windows 安装版，便携版建议从发布页手动下载。
 
 ## 快速开始
 
@@ -100,7 +122,7 @@
 ```bash
 npm install        # 装前端依赖（一次）
 npm run tauri dev  # 开发模式：前端热更新 + Rust 自动重编
-npm run bundle     # 打包：release exe + NSIS 安装包
+npm run bundle     # 打包：release exe + NSIS/MSI 安装包
 npm run bundle:portable  # 打包：便携版目录 + zip（dist-portable/）
 ```
 
@@ -110,13 +132,14 @@ npm run bundle:portable  # 打包：便携版目录 + zip（dist-portable/）
 |---|---|
 | 绿色单文件 exe | `src-tauri/target/release/izuna-toolbox.exe` |
 | NSIS 安装包 | `src-tauri/target/release/bundle/nsis/` |
+| MSI 安装包（best-effort） | `src-tauri/target/release/bundle/msi/` |
 | 便携版目录 | `dist-portable/Izuna-Toolbox-<版本>/` |
 | 便携版 zip | `dist-portable/Izuna-Toolbox-<版本>-portable-x64.zip` |
 
 便携版解压后双击 `Izuna Toolbox.exe` 即可运行，数据写在同目录的 `data/`；
 `portable.flag` 是便携模式标记，删掉它就回到安装版的 `%APPDATA%` 存储方式。
 GitHub Actions 打 tag（`v*`）时会把 NSIS 安装包和便携版 zip 一起传到 Release，
-手动触发 workflow 时也可以在 Actions Artifact 里下载。
+MSI 若构建成功也会一并上传；手动触发 workflow 时同样可以在 Actions Artifact 里下载。
 
 ### 改版本号
 
@@ -141,14 +164,17 @@ src/
 ├── types.ts                  与 Rust 结构体一一对应的 TS 类型
 ├── vars.ts                   变量引擎：表达式求值、百分比格式化、模板分词
 ├── api.ts                    invoke 命令封装
+├── updater.ts                自动更新：GitHub 检查（超时/取消）、版本比较、设置、命令封装
 └── components/
     ├── OverlaysPage.tsx      悬浮字幕（唯一功能页：每套浮窗一张完整配置卡）
     ├── OverlayWindow.tsx     浮窗窗口本体（监听配置、自适应尺寸、悬停工具条）
-    └── SubtitleView.tsx      字幕渲染（主窗口预览与浮窗共用，所见即所得）
+    ├── SubtitleView.tsx      字幕渲染（主窗口预览与浮窗共用，所见即所得）
+    └── UpdateDialog.tsx      检查更新弹窗（进度、取消下载、安装、启动检查开关）
 src-tauri/src/
 ├── lib.rs                    应用装配：启动浮窗、窗口事件、命令注册
 ├── store.rs                  SQLite 持久化（建表、示例种子）
 ├── commands.rs               全部 #[tauri::command]
+├── updater.rs                自动更新：可取消下载（进度事件）、启动安装器并退出
 ├── overlay_win.rs            浮窗窗口生命周期（创建/置顶/穿透/位置/显隐）
 └── tray.rs                   系统托盘（关闭 = 最小化，托盘退出）
 ```

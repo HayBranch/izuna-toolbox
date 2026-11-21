@@ -4,15 +4,17 @@
  * - 浮窗窗口（label = overlay-{id}）：渲染 OverlayWindow；
  * - 其他：主窗口外壳（单页：悬浮字幕的全部配置）。
  */
-import { useEffect, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useState } from "react";
 import { getConfig, openUrl, setMainAlwaysOnTop, subscribeConfig } from "./api";
-import type { AppConfig, MovedEvent } from "./types";
+import izunaIcon from "./assets/izuna-icon.png";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
-import izunaIcon from "./assets/izuna-icon.png";
+import UpdateDialog from "./components/UpdateDialog";
+import type { AppConfig, MovedEvent } from "./types";
+import { checkForUpdate, markChecked, shouldStartupCheck, type UpdateInfo } from "./updater";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 const isOverlay = isTauri && getCurrentWindow().label.startsWith("overlay-");
@@ -37,6 +39,8 @@ function MainShell() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [pinned, setPinned] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateToast, setUpdateToast] = useState<UpdateInfo | null>(null);
 
   // 重开应用时恢复上次的「主窗口置顶」选择
   useEffect(() => {
@@ -135,6 +139,24 @@ function MainShell() {
     };
   }, []);
 
+  // 启动检查：静默（失败一律忽略），12 小时内只查一次；GitHub 连不上时
+  // checkForUpdate 自带 8s 超时，不会拖慢启动或卡住界面。
+  useEffect(() => {
+    if (!shouldStartupCheck()) return;
+    const ctrl = new AbortController();
+    let alive = true;
+    checkForUpdate({ signal: ctrl.signal })
+      .then((r) => {
+        if (alive && r.hasUpdate) setUpdateToast(r);
+      })
+      .catch(() => {})
+      .finally(() => markChecked());
+    return () => {
+      alive = false;
+      ctrl.abort();
+    };
+  }, []);
+
   return (
     <div className="flex h-full">
       {/* 侧边导航：只有一个功能，固定高亮，不需要切换 */}
@@ -225,7 +247,38 @@ function MainShell() {
         )}
       </main>
 
-      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
+      {aboutOpen && (
+        <AboutDialog
+          onClose={() => setAboutOpen(false)}
+          onCheckUpdate={() => {
+            setAboutOpen(false);
+            setUpdateOpen(true);
+          }}
+        />
+      )}
+      {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
+
+      {updateToast && (
+        <div className="fixed bottom-5 right-5 z-40 flex items-center gap-3 rounded-xl border border-indigo-500/40 bg-slate-900 px-4 py-3 text-sm shadow-2xl">
+          <span className="text-slate-200">发现新版本 v{updateToast.latestVersion}</span>
+          <button
+            onClick={() => {
+              setUpdateOpen(true);
+              setUpdateToast(null);
+            }}
+            className="rounded-lg bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-indigo-400"
+          >
+            查看更新
+          </button>
+          <button
+            onClick={() => setUpdateToast(null)}
+            aria-label="关闭提示"
+            className="text-slate-500 transition hover:text-slate-200"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -250,7 +303,13 @@ function PinIcon({ filled }: { filled: boolean }) {
 }
 
 /** 「关于」弹窗：应用介绍、版本、仓库与开源协议 */
-function AboutDialog({ onClose }: { onClose: () => void }) {
+function AboutDialog({
+  onClose,
+  onCheckUpdate,
+}: {
+  onClose: () => void;
+  onCheckUpdate: () => void;
+}) {
   const [version, setVersion] = useState("");
   useEffect(() => {
     getVersion()
@@ -286,7 +345,7 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
           为直播玩家打造的本地小工具：把战绩数据做成一枚可被 OBS
           等直播软件捕获的悬浮字幕浮窗。支持多套浮窗（各自独立的变量与模板）、
           自定义变量与表达式计算、百分比格式化、多行换行排版；数据全部保存在本地
-          SQLite，不联网、不上传。
+          SQLite、不会上传，仅「检查更新」会连接 GitHub。
         </p>
 
         <div className="mt-4 space-y-1.5 rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-xs leading-5">
@@ -309,12 +368,20 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
           </p>
         </div>
 
-        <button
-          onClick={onClose}
-          className="mt-5 w-full rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
-        >
-          关闭
-        </button>
+        <div className="mt-5 flex gap-2">
+          <button
+            onClick={onCheckUpdate}
+            className="flex-1 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-indigo-500 hover:text-indigo-300"
+          >
+            检查更新
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
+          >
+            关闭
+          </button>
+        </div>
       </div>
     </div>
   );

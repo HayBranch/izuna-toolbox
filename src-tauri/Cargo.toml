@@ -24,6 +24,14 @@ serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
 tauri-plugin-single-instance = "2"
 
+# 自动更新只在 Windows 实现（应用只发布 Windows 版）。
+# gate 到 cfg(windows)：Linux 原生构建（CNB）完全不编译这些依赖，也就不需要
+# OpenSSL；windows-gnu 交叉编译只会带上 native-tls→schannel（纯 Rust，无 C 代码）。
+# reqwest 默认特性已含 default-tls(native-tls) + system-proxy(尊重系统代理) + http2。
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", features = ["stream"] }
+tokio = { version = "1", features = ["time"] }
+
 [profile.release]
 codegen-units = 1
 lto = true
