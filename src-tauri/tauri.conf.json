@@ -39,7 +39,11 @@
     ],
     "windows": {
       "webviewInstallMode": { "type": "skip" },
-      "nsis": { "installMode": "currentUser" }
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      },
+      "wix": { "language": "zh-CN" }
     }
   }
 }

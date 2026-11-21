@@ -138,6 +138,94 @@ export async function checkForUpdate(
   }
 }
 
+// ---------- 下载线路设置（沿用 localStorage 偏好的惯例） ----------
+
+/**
+ * 下载线路：默认走加速镜像（本应用受众以国内为主，GitHub 直连常超时/龟速）。
+ * 加速节点实时取自 <https://xiake.pro/github/>——站方按实测延迟排序节点池，
+ * 榜单会更新，所以每次打开更新弹窗都拉一次它的 script.js 解析出**前三个**镜像
+ * （站点没有 CORS 头，拉取走 Rust 的 `fetch_mirror_list` 命令）。
+ * 拉取失败时退回下面的内置兜底线路（写作本日站方榜单前二）。
+ */
+export interface DownloadLine {
+  label: string;
+  /** 镜像前缀（以 / 结尾）；空串表示 GitHub 直连。 */
+  prefix: string;
+}
+
+export const DIRECT_LINE: DownloadLine = { label: "直连 GitHub（不加速）", prefix: "" };
+
+export const FALLBACK_LINES: DownloadLine[] = [
+  { label: "加速下载①（git.tangbai.cc）", prefix: "https://git.tangbai.cc/" },
+  { label: "加速下载②（gh.927223.xyz）", prefix: "https://gh.927223.xyz/" },
+  DIRECT_LINE,
+];
+
+/** 榜单里保留的加速镜像数量（其余忽略）。 */
+const MAX_MIRRORS = 3;
+const LINE_NUMS = ["①", "②", "③", "④", "⑤"];
+
+/** 从 xiake.pro 的 script.js 里解析出 `mirrors` 数组（按站方延迟排序）。 */
+export function parseMirrors(js: string): string[] {
+  const block = js.match(/mirrors\s*=\s*\[([^\]]*)\]/)?.[1];
+  if (!block) return [];
+  const urls = block.match(/https:\/\/[^"',\s]+/g) ?? [];
+  return [...new Set(urls)]
+    .slice(0, MAX_MIRRORS)
+    .map((u) => (u.endsWith("/") ? u : `${u}/`));
+}
+
+function hostOf(prefix: string): string {
+  try {
+    return new URL(prefix).host;
+  } catch {
+    return prefix;
+  }
+}
+
+export function linesFromMirrors(mirrors: string[]): DownloadLine[] {
+  return [
+    ...mirrors.slice(0, MAX_MIRRORS).map((prefix, i) => ({
+      label: `加速下载${LINE_NUMS[i] ?? i + 1}（${hostOf(prefix)}）`,
+      prefix,
+    })),
+    DIRECT_LINE,
+  ];
+}
+
+/** 拉取实时榜单线路；失败（站点连不上/格式变了）静默退回内置线路。 */
+export async function fetchDownloadLines(): Promise<{
+  lines: DownloadLine[];
+  live: boolean;
+}> {
+  try {
+    const js = await invoke<string>("fetch_mirror_list");
+    const lines = linesFromMirrors(parseMirrors(js));
+    // 至少要有一条加速线（只剩直连说明解析失败）
+    if (lines.length > 1) return { lines, live: true };
+  } catch {
+    // 落到兜底
+  }
+  return { lines: FALLBACK_LINES, live: false };
+}
+
+/** 按前缀持久化（榜单是动态的，存下标会漂移；null = 未选过，默认第一条）。 */
+const LINE_KEY = "izuna.downloadLinePrefix";
+
+export function getSavedLinePrefix(): string | null {
+  const v = localStorage.getItem(LINE_KEY);
+  return v === null || v === "" || v.startsWith("http") ? v : null;
+}
+
+export function setDownloadLine(prefix: string): void {
+  localStorage.setItem(LINE_KEY, prefix);
+}
+
+/** 给 GitHub 资源链接套上所选线路的镜像前缀（直连则原样返回）。 */
+export function buildDownloadUrl(url: string, prefix: string): string {
+  return prefix ? `${prefix}${url}` : url;
+}
+
 // ---------- 启动检查设置（沿用 App.tsx 里 localStorage 偏好的惯例） ----------
 
 export function getAutoCheck(): boolean {

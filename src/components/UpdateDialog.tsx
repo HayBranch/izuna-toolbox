@@ -5,14 +5,20 @@
 import { useEffect, useRef, useState } from "react";
 import { openUrl } from "../api";
 import {
+    buildDownloadUrl,
     cancelUpdate,
     checkForUpdate,
     downloadUpdate,
+    fetchDownloadLines,
+    FALLBACK_LINES,
     getAutoCheck,
+    getSavedLinePrefix,
     installUpdate,
     onUpdateProgress,
     RELEASES_URL,
     setAutoCheck,
+    setDownloadLine,
+    type DownloadLine,
     type UpdateInfo,
 } from "../updater";
 
@@ -40,6 +46,11 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [assetIndex, setAssetIndex] = useState(0);
+  // 下载线路：先渲染内置兜底，再异步换上 xiake.pro 实时榜单（前三镜像 + 直连）
+  const [lines, setLines] = useState<DownloadLine[]>(FALLBACK_LINES);
+  const [linesLive, setLinesLive] = useState(false);
+  const [linePrefix, setLinePrefix] = useState<string | null>(getSavedLinePrefix);
+  const activeLine = lines.find((l) => l.prefix === linePrefix) ?? lines[0];
   const [progress, setProgress] = useState({ downloaded: 0, total: 0 });
   const [installedPath, setInstalledPath] = useState("");
   const [autoCheck, setAutoCheckState] = useState(getAutoCheck);
@@ -87,7 +98,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
       // 进度监听注册失败不影响下载本身
     }
     try {
-      const path = await downloadUpdate(asset.url, asset.name);
+      const path = await downloadUpdate(buildDownloadUrl(asset.url, activeLine.prefix), asset.name);
       if (!alive.current) return;
       setInstalledPath(path);
       setPhase("ready");
@@ -126,6 +137,11 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
     setAutoCheck(next);
   };
 
+  const chooseLine = (prefix: string) => {
+    setLinePrefix(prefix);
+    setDownloadLine(prefix);
+  };
+
   /** 关闭时若正在下载，先置取消位，避免留下孤儿下载。 */
   const requestClose = () => {
     if (phase === "downloading") runCancelDownload();
@@ -135,6 +151,12 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     alive.current = true;
     void runCheck();
+    // 检查版本的同时拉一份实时加速节点榜（失败静默，保持内置线路）
+    fetchDownloadLines().then((r) => {
+      if (!alive.current) return;
+      setLines(r.lines);
+      setLinesLive(r.live);
+    });
     return () => {
       alive.current = false;
       checkAbort.current?.abort();
@@ -218,12 +240,37 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
               ) : (
                 <p className="text-xs text-amber-400">该版本暂无安装包，请打开发布页手动下载。</p>
               )}
+              <label className="block space-y-1">
+                <span className="text-xs text-slate-500">
+                  下载线路（国内推荐加速）
+                  {linesLive ? " · 节点榜已更新" : ""}
+                </span>
+                <select
+                  value={activeLine.prefix}
+                  onChange={(e) => chooseLine(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300"
+                >
+                  {lines.map((l) => (
+                    <option key={l.prefix} value={l.prefix}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
+                {!linesLive && (
+                  <span className="block text-[11px] text-slate-600">
+                    实时节点榜获取失败，当前为内置线路；下载失败可换线路或直连重试。
+                  </span>
+                )}
+              </label>
             </div>
           )}
 
           {phase === "downloading" && (
             <div className="space-y-2">
-              <p className="text-slate-300">正在下载安装包…</p>
+              <p className="text-slate-300">
+                正在下载安装包…
+                <span className="ml-1 text-xs text-slate-500">（{activeLine.label}）</span>
+              </p>
               <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
                 <div
                   className={`h-full rounded-full bg-indigo-500 transition-all ${
@@ -254,6 +301,11 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
             <div className="space-y-1">
               <p className="font-medium text-rose-400">检查 / 下载失败</p>
               <p className="break-all text-xs leading-5 text-slate-400">{error}</p>
+              {activeLine.prefix && (
+                <p className="text-xs text-amber-400">
+                  当前线路「{activeLine.label}」可能失效，回「检查更新」换一条线路或直连重试。
+                </p>
+              )}
               <p className="text-xs text-slate-600">
                 GitHub 在国内可能连不上，可打开发布页手动下载。
               </p>

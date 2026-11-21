@@ -41,6 +41,14 @@ function MainShell() {
   const [pinned, setPinned] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateToast, setUpdateToast] = useState<UpdateInfo | null>(null);
+  const [version, setVersion] = useState("");
+
+  // 左上角显示当前版本号（与「关于」弹窗同源：Tauri 运行时版本，构建期注入兜底）
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(__APP_VERSION__));
+  }, []);
 
   // 重开应用时恢复上次的「主窗口置顶」选择
   useEffect(() => {
@@ -172,7 +180,7 @@ function MainShell() {
           </div>
           <div>
             <h1 className="font-semibold text-slate-100">泉奈工具箱</h1>
-            <p className="text-xs text-slate-500">Izuna Toolbox · Tauri 2</p>
+            <p className="text-xs text-slate-500">Izuna Toolbox{version ? ` · v${version}` : ""}</p>
           </div>
         </div>
 

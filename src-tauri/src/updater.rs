@@ -43,6 +43,39 @@ pub fn cancel_update(state: State<'_, UpdateState>) {
     state.cancel.store(true, Ordering::Relaxed);
 }
 
+/// 拉取加速节点榜单页的脚本原文（前端解析出前几个镜像）。
+/// 与 `download_update` 同理：目标站没有 CORS 头，前端读不到，只能走 Rust。
+/// URL 写死、不接受前端传参，避免被当作任意 URL 抓取器。
+#[tauri::command]
+pub async fn fetch_mirror_list() -> Result<String, String> {
+    fetch_mirror_list_impl().await
+}
+
+#[cfg(windows)]
+async fn fetch_mirror_list_impl() -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("izuna-toolbox-updater")
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("初始化请求失败：{e}"))?;
+    let resp = client
+        .get("https://xiake.pro/github/script.js")
+        .send()
+        .await
+        .map_err(|e| format!("连接节点列表站失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("获取节点列表失败：{e}"))?;
+    resp.text()
+        .await
+        .map_err(|e| format!("读取节点列表失败：{e}"))
+}
+
+#[cfg(not(windows))]
+async fn fetch_mirror_list_impl() -> Result<String, String> {
+    Err("加速节点列表仅支持 Windows".into())
+}
+
 /// 下载安装包到临时目录，返回本地路径。命令在所有平台都存在，网络实现见 helper
 /// （非 Windows 直接返回不支持，写法与 `commands.rs::open_url` 一致）。
 #[tauri::command]
@@ -96,29 +129,58 @@ async fn download_update_impl(
         .build()
         .map_err(|e| format!("初始化下载失败：{e}"))?;
 
-    let mut resp = client
-        .get(url.as_str())
-        .send()
-        .await
-        .map_err(|e| format!("连接 GitHub 失败：{e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载被拒绝：{e}"))?;
+    // 发起请求（含跟随重定向）：整体最多 10s，期间每 300ms 回头查一次取消标志。
+    // 有些加速节点会「TCP 连上了却不回响应头」，裸 .send() 会永远挂起，
+    // 走不到下面查取消的读循环里，取消按钮就再也不起作用（实测复现过）。
+    let send_fut = client.get(url.as_str()).send();
+    tokio::pin!(send_fut);
+    let send_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut resp = loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消下载".into());
+        }
+        let left = send_deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err("连接超时（10s），可换一条下载线路重试".into());
+        }
+        let slice = left.min(std::time::Duration::from_millis(300));
+        match tokio::time::timeout(slice, send_fut.as_mut()).await {
+            // 超时切片只是回头查一次取消标志，不算失败，继续等同一个请求
+            Ok(r) => {
+                let r = r.map_err(|e| format!("连接 GitHub 失败：{e}"))?;
+                let r = r.error_for_status().map_err(|e| format!("下载被拒绝：{e}"))?;
+                break r;
+            }
+            Err(_) => continue,
+        }
+    };
 
     let total = resp.content_length().unwrap_or(0);
     let mut file = std::fs::File::create(&path).map_err(|e| format!("创建安装包失败：{e}"))?;
     let mut downloaded: u64 = 0;
 
     let result: Result<(), String> = loop {
-        if cancel.load(Ordering::Relaxed) {
-            break Err("已取消下载".into());
-        }
-        // 每块 15s 没数据就当作网络卡死，快速失败而不是无限等待；
-        // 也保证了「卡住时点取消」能在最多一个块周期内生效。
-        let chunk = match tokio::time::timeout(std::time::Duration::from_secs(15), resp.chunk()).await {
-            Ok(Ok(Some(c))) => c,
-            Ok(Ok(None)) => break Ok(()),
-            Ok(Err(e)) => break Err(format!("下载中断：{e}")),
-            Err(_) => break Err("下载超时（网络无响应）".into()),
+        // 等下一块数据：单块 15s 无数据判为网络卡死；期间同样每 300ms
+        // 查一次取消标志，保证「卡住时点取消」立即生效而不是等满 15s。
+        let chunk_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let chunk = loop {
+            if cancel.load(Ordering::Relaxed) {
+                break Err("已取消下载".into());
+            }
+            let left = chunk_deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break Err("下载超时（网络无响应）".into());
+            }
+            let slice = left.min(std::time::Duration::from_millis(300));
+            match tokio::time::timeout(slice, resp.chunk()).await {
+                Ok(r) => break r.map_err(|e| format!("下载中断：{e}")),
+                Err(_) => continue,
+            }
+        };
+        let chunk = match chunk {
+            Ok(Some(c)) => c,
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(e),
         };
         if let Err(e) = file.write_all(&chunk) {
             break Err(format!("写入安装包失败：{e}"));

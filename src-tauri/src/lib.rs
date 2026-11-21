@@ -181,7 +181,8 @@ pub fn run() {
             commands::open_url,
             updater::download_update,
             updater::cancel_update,
-            updater::install_update
+            updater::install_update,
+            updater::fetch_mirror_list
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");
