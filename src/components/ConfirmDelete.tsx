@@ -31,8 +31,8 @@ export default function ConfirmDelete({
       title={armed ? "再点一次确认删除" : title}
       className={
         armed
-          ? "shrink-0 rounded-lg border border-rose-500/60 bg-rose-500/15 px-2 py-1 text-xs text-rose-300"
-          : "shrink-0 px-1 text-sm text-slate-600 transition hover:text-rose-400"
+          ? "shrink-0 rounded-lg border border-rose-500/60 bg-rose-500/15 px-2 py-1 text-xs text-rose-700 dark:text-rose-300"
+          : "shrink-0 px-1 text-sm text-slate-400 transition hover:text-rose-500 dark:text-slate-600 dark:hover:text-rose-400"
       }
     >
       {armed ? "确认删除?" : "🗑"}

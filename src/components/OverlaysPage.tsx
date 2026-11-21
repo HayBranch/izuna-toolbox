@@ -1,10 +1,13 @@
 /**
- * 悬浮字幕页 —— 这是一个功能，所有配置都在这一页：
- * 每张卡片 = 一套完全独立的浮窗（各自的变量、计算变量、账号、模板与样式），
- * 不再需要跨页切换、也不用先选"编辑哪一套"。
+ * 悬浮字幕页 —— 两级界面：
+ * 1) 列表：一眼看到每套浮窗的基本信息（名称 / 创建 / 最后修改 / 显示 / 置顶 / 鼠标穿透），
+ *    点一行进入这一套的配置；
+ * 2) 详情：这一套浮窗的全部配置（变量、模板、样式、预览）。左上角返回列表，
+ *    右上角 ℹ️ 悬浮显示基本信息。
  *
+ * 每张卡片 = 一套完全独立的浮窗（各自的变量、计算变量、账号、模板与样式）。
  * 卡片分区（从上到下）：
- * - 头部：名称 + 显示/置顶/鼠标穿透开关 + 删除
+ * - 头部：返回 + 名称 + 创建时间 + 显示/置顶/鼠标穿透开关 + 信息/保存/删除
  * - 变量：自定义变量（−/＋ 计数，可设置跟随联动）+ 计算变量（表达式），都是这一套自己的
  * - 显示内容：账号 + 模板（回车即换行；点芯片插入变量；↵ 插入换行）
  * - 外观：字号/颜色/加粗/描边/背景 + 自动换行与最大宽度
@@ -50,6 +53,9 @@ type Run = (p: Promise<unknown>) => Promise<boolean>;
 
 export default function OverlaysPage({ config }: { config: AppConfig }) {
   const [error, setError] = useState<string | null>(null);
+  // null = 列表；数字 = 正在配置的那套浮窗（删除后自动回列表）
+  const [openId, setOpenId] = useState<number | null>(null);
+
   const run: Run = async (p) => {
     try {
       await p;
@@ -61,47 +67,163 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
     }
   };
 
+  // 配置回流后按 id 重新查找：开关/编辑拿到的一定是最新值
+  const open = openId === null ? null : (config.overlays.find((o) => o.id === openId) ?? null);
+
+  /** 新建后直接进入配置（少点一次；失败仍走统一错误条） */
+  const create = async () => {
+    try {
+      const next = await addOverlay();
+      setError(null);
+      const created = next.overlays[next.overlays.length - 1];
+      if (created) setOpenId(created.id);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className="space-y-5">
       {error && (
-        <div className="sticky top-0 z-20 flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-950 px-4 py-2.5 text-sm text-rose-300 shadow-xl" role="alert">
+        <div
+          className="sticky top-0 z-20 flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-50 px-4 py-2.5 text-sm text-rose-700 shadow-xl dark:bg-rose-950 dark:text-rose-300"
+          role="alert"
+        >
           <span className="min-w-0 flex-1">{error}</span>
-          <button onClick={() => setError(null)} className="shrink-0 text-rose-400 hover:text-rose-200" aria-label="关闭错误提示">✕</button>
+          <button
+            onClick={() => setError(null)}
+            className="shrink-0 text-rose-500 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-200"
+            aria-label="关闭错误提示"
+          >
+            ✕
+          </button>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="max-w-3xl text-sm leading-6 text-slate-500">
-          每张卡片就是一套完整的浮窗：变量、模板、样式都在这张卡里，套与套互不影响。
-          修改会自动写入本地 SQLite，也可点卡片右上角「保存」立即落盘。
-          主窗口在前台时浮窗会临时取消置顶，不会挡住按钮；切到游戏/桌面后浮窗恢复置顶，可直接拖动。
-        </p>
-        <button
-          onClick={() => run(addOverlay())}
-          className="shrink-0 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
-        >
-          ＋ 新建浮窗
-        </button>
-      </div>
+      {open ? (
+        <OverlayEditor key={open.id} overlay={open} onBack={() => setOpenId(null)} run={run} />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
+              列表先看基本信息，点名称进入配置；<strong className="font-medium text-slate-600 dark:text-slate-300">显示 / 置顶 / 鼠标穿透可以直接点标签开关</strong>，不用进详情。
+              每套浮窗的变量、模板、样式完全独立。修改会自动写入本地 SQLite；
+              主窗口在前台时浮窗会临时取消置顶，切到游戏/桌面后恢复置顶，可直接拖动。
+            </p>
+            <button
+              onClick={() => void create()}
+              className="shrink-0 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
+            >
+              ＋ 新建浮窗
+            </button>
+          </div>
 
-      {config.overlays.map((overlay) => (
-        <OverlayEditor key={overlay.id} overlay={overlay} run={run} />
-      ))}
+          <ul className="space-y-2">
+            {config.overlays.map((overlay) => (
+              <OverlayRow
+                key={overlay.id}
+                overlay={overlay}
+                run={run}
+                onOpen={() => setOpenId(overlay.id)}
+              />
+            ))}
+          </ul>
 
-      {config.overlays.length === 0 && (
-        <p className="rounded-2xl border border-dashed border-slate-800 p-10 text-center text-sm text-slate-600">
-          还没有浮窗，点右上角「＋ 新建浮窗」创建一个
-        </p>
+          {config.overlays.length === 0 && (
+            <p className="rounded-2xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500 dark:border-slate-800 dark:text-slate-600">
+              还没有浮窗，点右上角「＋ 新建浮窗」创建一个
+            </p>
+          )}
+        </>
       )}
     </div>
   );
 }
 
+/** 列表行：名称 + 创建/修改时间 + 可直接开关的三个状态；点名称进入配置 */
+function OverlayRow({
+  overlay,
+  run,
+  onOpen,
+}: {
+  overlay: OverlayConfig;
+  run: Run;
+  onOpen: () => void;
+}) {
+  const updated = overlay.updatedAt || overlay.createdAt;
+  return (
+    <li className="rounded-2xl border border-slate-200 bg-white/70 transition hover:border-indigo-400 hover:bg-white hover:shadow-lg hover:shadow-indigo-500/10 dark:border-slate-800 dark:bg-slate-900/60 dark:hover:border-indigo-500 dark:hover:bg-slate-900">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4">
+        <button
+          type="button"
+          onClick={onOpen}
+          title="打开这套浮窗的配置"
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+        >
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-base text-indigo-600 dark:text-indigo-300">
+            🪟
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate font-medium text-slate-900 dark:text-slate-100">
+              {overlay.name || "未命名浮窗"}
+            </span>
+            <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-500">
+              创建 {formatDateTime(overlay.createdAt)} · 修改 {formatDateTime(updated)}
+              {overlay.account ? ` · 账号 ${overlay.account}` : ""}
+            </span>
+          </span>
+        </button>
+
+        {/* 状态标签本身就是开关：不必进详情就能显示/隐藏、置顶、穿透 */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <ChipToggle
+            on={overlay.shown}
+            onLabel="显示中"
+            offLabel="已隐藏"
+            title={overlay.shown ? "点击隐藏这套浮窗（配置保留）" : "点击显示这套浮窗"}
+            onClick={() => run(setOverlayShown(overlay.id, !overlay.shown))}
+          />
+          <ChipToggle
+            on={overlay.alwaysOnTop}
+            onLabel="置顶"
+            offLabel="不置顶"
+            title={overlay.alwaysOnTop ? "点击取消浮窗置顶" : "点击让浮窗始终置顶"}
+            onClick={() => run(setOverlayAlwaysTop(overlay.id, !overlay.alwaysOnTop))}
+          />
+          <ChipToggle
+            on={overlay.clickThrough}
+            onLabel="鼠标穿透"
+            offLabel="可点击"
+            tone="amber"
+            title={
+              overlay.clickThrough
+                ? "点击关闭鼠标穿透（浮窗重新响应鼠标）"
+                : "点击开启鼠标穿透（浮窗不挡游戏操作）"
+            }
+            onClick={() => run(setOverlayClickThrough(overlay.id, !overlay.clickThrough))}
+          />
+        </div>
+
+        <button
+          type="button"
+          onClick={onOpen}
+          title="打开这套浮窗的配置"
+          className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-indigo-500/10 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-slate-500 dark:hover:text-indigo-300"
+        >
+          配置 <span aria-hidden="true">›</span>
+        </button>
+      </div>
+    </li>
+  );
+}
+
 function OverlayEditor({
   overlay,
+  onBack,
   run,
 }: {
   overlay: OverlayConfig;
+  onBack: () => void;
   run: Run;
 }) {
   // 本套浮窗自己的变量：模板芯片与预览都用它
@@ -114,13 +236,25 @@ function OverlayEditor({
   const editingText = useRef(false);
   const editVersion = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 防抖窗口内点了「返回列表」：组件卸载时把还没提交的草稿补一次，
+  // 避免刚改完就切走导致最后一次输入丢失。
+  const pending = useRef<{ next: OverlayConfig; version: number } | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // 配置回流（自己提交的或别的窗口改的）：输入框没在编辑中就同步
   useEffect(() => {
     if (!editingText.current) setDraft(overlay);
   }, [overlay]);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+      const p = pending.current;
+      if (!p) return;
+      pending.current = null;
+      void updateOverlay(p.next).catch(console.warn);
+    },
+    [],
+  );
 
   /** 立即保存本卡名称、账号、模板与外观；旧请求完成不能覆盖新编辑的状态。 */
   const save = async (next: OverlayConfig, version = editVersion.current) => {
@@ -130,12 +264,16 @@ function OverlayEditor({
     }
     setSaveState("saving");
     const ok = await run(updateOverlay(next));
-    if (version === editVersion.current) setSaveState(ok ? "saved" : "error");
+    if (version === editVersion.current) {
+      pending.current = null;
+      setSaveState(ok ? "saved" : "error");
+    }
   };
 
   const push = (next: OverlayConfig, immediate = false) => {
     editVersion.current += 1;
     const version = editVersion.current;
+    pending.current = { next, version };
     setDraft(next);
     setSaveState("dirty");
     if (timer.current) clearTimeout(timer.current);
@@ -168,7 +306,7 @@ function OverlayEditor({
 
   return (
     <div
-      className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5"
+      className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60"
       onFocusCapture={() => (editingText.current = true)}
       onBlurCapture={() => (editingText.current = false)}
       onKeyDown={(e) => {
@@ -178,15 +316,26 @@ function OverlayEditor({
         }
       }}
     >
-      {/* 头部：名称 + 创建时间 + 三个开关 + 删除 */}
+      {/* 头部：返回 + 名称 + 创建时间 + 三个开关 + 信息/保存/删除 */}
       <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={onBack}
+          title="返回浮窗列表"
+          className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+        >
+          ← 返回列表
+        </button>
         <input
           value={draft.name}
           onChange={(e) => patch({ name: e.target.value })}
           placeholder="浮窗名称"
-          className="w-40 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-1.5 text-sm font-medium text-slate-200 outline-none transition focus:border-indigo-500"
+          className="w-40 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
         />
-        <span title="创建时间" className="font-mono text-[11px] text-slate-600">
+        <span
+          title="创建时间"
+          className="font-mono text-[11px] text-slate-400 dark:text-slate-600"
+        >
           🕒 {formatDateTime(overlay.createdAt)}
         </span>
         {/* 开关一律以服务端配置为准（overlay.*），避免快速连点用到过期草稿 */}
@@ -207,13 +356,14 @@ function OverlayEditor({
           onClick={() => run(setOverlayClickThrough(overlay.id, !overlay.clickThrough))}
         />
         <div className="ml-auto flex items-center gap-2">
+          <InfoButton overlay={overlay} />
           <span
             className={`text-xs ${
               saveState === "error"
-                ? "text-rose-400"
+                ? "text-rose-500 dark:text-rose-400"
                 : saveState === "dirty"
-                  ? "text-amber-300"
-                  : "text-slate-500"
+                  ? "text-amber-600 dark:text-amber-300"
+                  : "text-slate-400 dark:text-slate-500"
             }`}
             role="status"
           >
@@ -232,7 +382,7 @@ function OverlayEditor({
             className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
               saveState === "dirty" || saveState === "error"
                 ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
-                : "border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-300"
+                : "border-slate-300 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
             } disabled:cursor-wait disabled:opacity-60`}
           >
             {saveState === "saving" ? "保存中…" : "保存"}
@@ -245,7 +395,7 @@ function OverlayEditor({
       </div>
 
       {overlay.clickThrough && (
-        <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+        <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           已开启鼠标穿透：浮窗不响应任何鼠标点击（不会挡住游戏操作），
           位置只能用下方 X/Y 调整，解锁也在这里。
         </p>
@@ -254,15 +404,20 @@ function OverlayEditor({
       {/* 变量 | 显示内容 */}
       <div className="mt-4 grid gap-4 lg:grid-cols-5">
         {/* 变量区：这一套自己的自定义变量 + 计算变量 */}
-        <section className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 lg:col-span-3">
-          <p className="text-sm font-medium text-slate-300">
-            变量 <span className="text-xs font-normal text-slate-500">这套自己独立，其它浮窗看不到</span>
+        <section className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/40 lg:col-span-3">
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+            变量{" "}
+            <span className="text-xs font-normal text-slate-400 dark:text-slate-500">
+              这套自己独立，其它浮窗看不到
+            </span>
           </p>
 
           <div className="mt-3 flex items-center justify-between gap-2">
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               自定义变量{" "}
-              <span className="text-slate-600">−/＋ 计数，模板里 {"{A1}"} 引用；要让 A1 跟着 A3，在 A1 行设置「联动」</span>
+              <span className="text-slate-400 dark:text-slate-600">
+                −/＋ 计数，模板里 {"{A1}"} 引用；要让 A1 跟着 A3，在 A1 行设置「联动」
+              </span>
             </p>
             <button
               onClick={() => run(addVariable(overlay.id, "新变量", null, 0, 1))}
@@ -282,15 +437,18 @@ function OverlayEditor({
               />
             ))}
             {overlay.variables.length === 0 && (
-              <p className="rounded-xl border border-dashed border-slate-800 px-4 py-5 text-center text-xs text-slate-600">
+              <p className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-600">
                 还没有变量，点「＋ 添加」（比如：总数、人机、真人…）
               </p>
             )}
           </div>
 
           <div className="mt-4 flex items-center justify-between gap-2">
-            <p className="text-xs text-slate-400">
-              计算变量 <span className="text-slate-600">表达式自动算，模板里 {"{B1}"} 引用</span>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              计算变量{" "}
+              <span className="text-slate-400 dark:text-slate-600">
+                表达式自动算，模板里 {"{B1}"} 引用
+              </span>
             </p>
             <button
               onClick={() => run(addComputed(overlay.id, "新计算", null, "A1 + A2", "plain", 0))}
@@ -304,7 +462,7 @@ function OverlayEditor({
               <ComputedRow key={c.id} computed={c} overlayId={overlay.id} lookup={lookup} run={run} />
             ))}
             {overlay.computed.length === 0 && (
-              <p className="rounded-xl border border-dashed border-slate-800 px-4 py-5 text-center text-xs text-slate-600">
+              <p className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-600">
                 比如「总胜率」= A4 / (A1 + A2)，格式选百分比
               </p>
             )}
@@ -312,27 +470,28 @@ function OverlayEditor({
         </section>
 
         {/* 显示内容区：账号 + 模板 */}
-        <section className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 lg:col-span-2">
-          <p className="text-sm font-medium text-slate-300">显示内容</p>
+        <section className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/40 lg:col-span-2">
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">显示内容</p>
 
-          <label className="mt-3 block text-xs text-slate-400">
-            账号 <span className="text-slate-600">模板里 {"{account}"} 显示</span>
+          <label className="mt-3 block text-xs text-slate-500 dark:text-slate-400">
+            账号{" "}
+            <span className="text-slate-400 dark:text-slate-600">模板里 {"{account}"} 显示</span>
             <input
               value={draft.account}
               onChange={(e) => patch({ account: e.target.value })}
               placeholder="比如：泉奈"
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-1.5 text-sm outline-none transition focus:border-indigo-500"
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
             />
           </label>
 
           <div className="mt-3 flex items-center justify-between gap-2">
-            <label className="text-xs text-slate-400">
-              模板 <span className="text-slate-600">回车即换行</span>
+            <label className="text-xs text-slate-500 dark:text-slate-400">
+              模板 <span className="text-slate-400 dark:text-slate-600">回车即换行</span>
             </label>
             <button
               onClick={() => patch({ template: EXAMPLE_TEMPLATE })}
               title="把模板替换成多行示例排版（会覆盖现有内容，可再自行修改）"
-              className="shrink-0 rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-400 transition hover:border-indigo-500 hover:text-indigo-300"
+              className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
             >
               示例模板
             </button>
@@ -342,13 +501,13 @@ function OverlayEditor({
             value={draft.template}
             onChange={(e) => patch({ template: e.target.value })}
             rows={5}
-            className="mt-1 w-full resize-y rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-2.5 font-mono text-sm leading-6 outline-none transition focus:border-indigo-500"
+            className="mt-1 w-full resize-y rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm leading-6 text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
           />
           <div className="mt-2 flex flex-wrap gap-1.5">
             <button
               onClick={() => insertText("\n")}
               title="在光标处插入换行"
-              className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 font-mono text-[11px] text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+              className="rounded-full border border-slate-300 bg-white px-2 py-0.5 font-mono text-[11px] text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-300 dark:hover:border-slate-500 dark:hover:text-slate-100"
             >
               ↵ 换行
             </button>
@@ -359,19 +518,19 @@ function OverlayEditor({
                 title={def.label}
                 className={`rounded-full border px-2 py-0.5 font-mono text-[11px] transition ${
                   def.computed
-                    ? "border-indigo-700/60 bg-indigo-950/40 text-indigo-300 hover:border-indigo-400 hover:text-indigo-200"
-                    : "border-slate-700 bg-slate-950/60 text-cyan-300 hover:border-cyan-500 hover:text-cyan-200"
+                    ? "border-indigo-300 bg-indigo-50 text-indigo-700 hover:border-indigo-400 hover:text-indigo-800 dark:border-indigo-700/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:border-indigo-400 dark:hover:text-indigo-200"
+                    : "border-slate-300 bg-white text-cyan-700 hover:border-cyan-500 hover:text-cyan-800 dark:border-slate-700 dark:bg-slate-950/60 dark:text-cyan-300 dark:hover:border-cyan-500 dark:hover:text-cyan-200"
                 }`}
               >
                 {`{${def.key}}`}
               </button>
             ))}
           </div>
-          <p className="mt-1.5 text-xs leading-5 text-slate-500">
+          <p className="mt-1.5 text-xs leading-5 text-slate-500 dark:text-slate-500">
             点芯片在光标处插入变量；靛蓝色为计算变量（表达式自动算），
-            <code className="text-indigo-300">{"{today}"}</code> /{" "}
-            <code className="text-indigo-300">{"{date}"}</code> /{" "}
-            <code className="text-indigo-300">{"{time}"}</code> 自动取当前时间。
+            <code className="text-indigo-600 dark:text-indigo-300">{"{today}"}</code> /{" "}
+            <code className="text-indigo-600 dark:text-indigo-300">{"{date}"}</code> /{" "}
+            <code className="text-indigo-600 dark:text-indigo-300">{"{time}"}</code> 自动取当前时间。
           </p>
         </section>
       </div>
@@ -379,7 +538,7 @@ function OverlayEditor({
       {/* 外观 | 预览 */}
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         {/* 外观：文字 + 背景 + 换行 */}
-        <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/40">
           <NumberField label="字号" value={draft.fontSize} min={10} max={72}
             onChange={(v) => patch({ fontSize: v })} />
           <ColorField label="字体颜色" value={draft.fontColor}
@@ -392,27 +551,27 @@ function OverlayEditor({
             onChange={(v) => patch({ bgColor: v })} />
           <div className="col-span-2">
             <div className="flex items-baseline justify-between">
-              <span className="text-xs text-slate-400">背景不透明度</span>
-              <span className="font-mono text-xs text-cyan-300">{draft.bgOpacity}%</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">背景不透明度</span>
+              <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300">{draft.bgOpacity}%</span>
             </div>
             <input
               type="range" min={0} max={100} step={5} value={draft.bgOpacity}
               onChange={(e) => patch({ bgOpacity: Number(e.target.value) })}
-              className="mt-1 w-full accent-cyan-400"
+              className="mt-1 w-full accent-cyan-500 dark:accent-cyan-400"
             />
           </div>
-          <div className="col-span-2 border-t border-slate-800 pt-3">
+          <div className="col-span-2 border-t border-slate-200 pt-3 dark:border-slate-800">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <MiniToggle label="自动换行" on={draft.wrap} onClick={() => patch({ wrap: !draft.wrap }, true)} />
               {draft.wrap && (
-                <label className="flex items-center gap-1.5 text-xs text-slate-400">
+                <label className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                   最大宽度
                   <InlineNumber value={draft.maxWidth} min={80} max={4000} suffix="px"
                     onChange={(v) => patch({ maxWidth: v })} />
                 </label>
               )}
             </div>
-            <p className="mt-1.5 text-xs text-slate-600">
+            <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-600">
               {draft.wrap
                 ? "模板里的回车换行；超过最大宽度的长行自动折行，浮窗高度自适应。"
                 : "只有模板里的回车会换行；长行保持一行（超过屏幕会被截断）。"}
@@ -423,7 +582,7 @@ function OverlayEditor({
         {/* 预览：模拟直播画面 */}
         <div className="flex flex-col">
           {/* m-auto 在内容过宽时可滚动查看（justify-center 会裁剪） */}
-          <div className="flex min-h-40 flex-1 overflow-auto rounded-xl border border-slate-800 bg-gradient-to-br from-emerald-900 via-slate-900 to-indigo-950 p-4">
+          <div className="flex min-h-40 flex-1 overflow-auto rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-900 via-slate-900 to-indigo-950 p-4 dark:border-slate-800">
             <div className="m-auto"><SubtitleView cfg={draft} vars={vars} /></div>
           </div>
           <div className="mt-3 flex items-center gap-3">
@@ -431,11 +590,99 @@ function OverlayEditor({
               onChange={(v) => run(moveOverlay(overlay.id, v, overlay.y))} />
             <NumberField label="位置 Y" value={overlay.y} min={-9999} max={9999} wide
               onChange={(v) => run(moveOverlay(overlay.id, overlay.x, v))} />
-            <span className="text-xs text-slate-500">拖动浮窗自动保存</span>
+            <span className="text-xs text-slate-400 dark:text-slate-500">拖动浮窗自动保存</span>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------- 基本信息 ----------
+
+/** 卡片右上角「关于」按钮：悬浮（或键盘聚焦）时显示这套浮窗的基本信息 */
+function InfoButton({ overlay }: { overlay: OverlayConfig }) {
+  const updated = overlay.updatedAt || overlay.createdAt;
+  return (
+    <span className="group relative shrink-0">
+      <button
+        type="button"
+        aria-label="关于这套浮窗"
+        title="悬浮查看基本信息"
+        className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 text-sm text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+      >
+        ℹ️
+      </button>
+      <div
+        role="tooltip"
+        className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs opacity-0 shadow-2xl transition group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100 dark:border-slate-700 dark:bg-slate-900"
+      >
+        <p className="truncate font-medium text-slate-800 dark:text-slate-100">
+          {overlay.name || "未命名浮窗"}
+        </p>
+        <dl className="mt-2 space-y-1">
+          <InfoLine label="创建时间" value={formatDateTime(overlay.createdAt)} />
+          <InfoLine label="最后修改" value={formatDateTime(updated)} />
+          <InfoLine label="是否显示" value={overlay.shown ? "显示中" : "已隐藏"} />
+          <InfoLine label="置顶" value={overlay.alwaysOnTop ? "是" : "否"} />
+          <InfoLine
+            label="鼠标穿透"
+            value={overlay.clickThrough ? "已开启（锁定）" : "关闭"}
+          />
+          <InfoLine label="位置" value={`X ${overlay.x} · Y ${overlay.y}`} />
+          <InfoLine
+            label="变量"
+            value={`${overlay.variables.length} 自定义 · ${overlay.computed.length} 计算`}
+          />
+        </dl>
+      </div>
+    </span>
+  );
+}
+
+function InfoLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="shrink-0 text-slate-400 dark:text-slate-500">{label}</dt>
+      <dd className="text-right text-slate-600 dark:text-slate-300">{value}</dd>
+    </div>
+  );
+}
+
+/** 列表里的状态开关标签（点击直接切换，不用进详情） */
+function ChipToggle({
+  on,
+  onLabel,
+  offLabel,
+  title,
+  onClick,
+  tone = "default",
+}: {
+  on: boolean;
+  onLabel: string;
+  offLabel: string;
+  title: string;
+  onClick: () => void;
+  tone?: "default" | "amber";
+}) {
+  const onCls =
+    tone === "amber"
+      ? "border-amber-500/40 bg-amber-500/10 text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+      : "border-cyan-500/40 bg-cyan-500/10 text-cyan-700 hover:bg-cyan-500/20 dark:text-cyan-300";
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      title={title}
+      onClick={onClick}
+      className={`rounded-full border px-2 py-0.5 text-[11px] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+        on
+          ? onCls
+          : "border-slate-200 bg-slate-100 text-slate-400 hover:border-slate-300 hover:text-slate-600 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-500 dark:hover:text-slate-300"
+      }`}
+    >
+      {on ? onLabel : offLabel}
+    </button>
   );
 }
 
@@ -446,17 +693,32 @@ function useRowDraft<T extends { id: number }>(source: T, run: Run, submit: (dra
   const [draft, setDraft] = useState(source);
   const editing = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 防抖窗口内切回列表：卸载时补交最后一次修改，避免丢字
+  const pending = useRef<T | null>(null);
 
   useEffect(() => {
     if (!editing.current) setDraft(source);
   }, [source]);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+      const next = pending.current;
+      if (!next) return;
+      pending.current = null;
+      void run(submit(next));
+    },
+    [],
+  );
 
   const commit = (partial: Partial<T>, immediate = false) => {
     const next = { ...draft, ...partial };
+    pending.current = next;
     setDraft(next);
     if (timer.current) clearTimeout(timer.current);
-    const task = () => run(submit(next));
+    const task = () => {
+      pending.current = null;
+      void run(submit(next));
+    };
     if (immediate) task();
     else timer.current = setTimeout(task, 400);
   };
@@ -511,7 +773,7 @@ function VarRow({
 
   return (
     <div
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2.5"
+      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40"
       onFocusCapture={() => (editing.current = true)}
       onBlurCapture={() => (editing.current = false)}
     >
@@ -520,34 +782,34 @@ function VarRow({
         value={draft.key}
         onChange={(e) => commit({ key: e.target.value })}
         title="引用名：模板和表达式里用 {A1} 这样引用"
-        className="w-14 rounded-lg border border-cyan-800/60 bg-slate-950 px-2 py-1 text-center font-mono text-xs text-cyan-300 outline-none transition focus:border-cyan-500"
+        className="w-14 rounded-lg border border-cyan-300 bg-white px-2 py-1 text-center font-mono text-xs text-cyan-700 outline-none transition focus:border-cyan-500 dark:border-cyan-800/60 dark:bg-slate-950 dark:text-cyan-300"
       />
-      <span className="text-slate-600">=</span>
+      <span className="text-slate-400 dark:text-slate-600">=</span>
       {/* 显示名 */}
       <input
         value={draft.name}
         onChange={(e) => commit({ name: e.target.value })}
         placeholder="名字，如：总数"
-        className="w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-200 outline-none transition focus:border-indigo-500"
+        className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
       />
       <div className="ml-auto flex items-center gap-1.5">
         <button
           onClick={() => run(stepVariable(overlayId, draft.id, -draft.step))}
-          className="h-9 w-9 rounded-lg border border-slate-700 text-lg text-slate-300 transition hover:border-rose-400 hover:text-rose-300 active:scale-95"
+          className="h-9 w-9 rounded-lg border border-slate-300 text-lg text-slate-600 transition hover:border-rose-400 hover:text-rose-600 active:scale-95 dark:border-slate-700 dark:text-slate-300 dark:hover:border-rose-400 dark:hover:text-rose-300"
         >
           −
         </button>
-        <span className="min-w-14 text-center font-mono text-xl font-semibold tabular-nums text-slate-100">
+        <span className="min-w-14 text-center font-mono text-xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">
           {fmtNum(variable.value, -1)}
         </span>
         <button
           onClick={() => run(stepVariable(overlayId, draft.id, draft.step))}
-          className="h-9 w-9 rounded-lg border border-slate-700 text-lg text-slate-300 transition hover:border-cyan-400 hover:text-cyan-300 active:scale-95"
+          className="h-9 w-9 rounded-lg border border-slate-300 text-lg text-slate-600 transition hover:border-cyan-400 hover:text-cyan-600 active:scale-95 dark:border-slate-700 dark:text-slate-300 dark:hover:border-cyan-400 dark:hover:text-cyan-300"
         >
           ＋
         </button>
       </div>
-      <label className="flex items-center gap-1 text-xs text-slate-500">
+      <label className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-500">
         步长
         <input
           type="number"
@@ -558,7 +820,7 @@ function VarRow({
             const v = Number(e.target.value);
             if (Number.isFinite(v)) commit({ step: v });
           }}
-          className="w-16 rounded-lg border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-xs text-slate-300 outline-none transition focus:border-indigo-500"
+          className="w-16 rounded-lg border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs text-slate-700 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
         />
       </label>
       <ConfirmDelete
@@ -567,14 +829,14 @@ function VarRow({
       />
 
       {/* 联动：本变量跟随谁。被跟随变量 −/＋ 时，本变量同步同幅度的增减（单向）。 */}
-      <div className="flex w-full flex-wrap items-center gap-2 border-t border-slate-800/70 pt-2">
-        <span className="text-xs text-slate-500">🔗 联动</span>
+      <div className="flex w-full flex-wrap items-center gap-2 border-t border-slate-200 pt-2 dark:border-slate-800/70">
+        <span className="text-xs text-slate-500 dark:text-slate-500">🔗 联动</span>
         <select
           value={draft.followId}
           onChange={(e) => commit({ followId: Number(e.target.value) }, true)}
           aria-label="联动：跟随哪个变量"
           title="被跟随的变量每次 −/＋，这个变量也跟着同样幅度变化（单向）"
-          className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-300 outline-none transition focus:border-cyan-500"
+          className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition focus:border-cyan-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
         >
           <option value={0}>不跟随</option>
           {followOptions.map((v) => (
@@ -583,13 +845,13 @@ function VarRow({
             </option>
           ))}
         </select>
-        <span className="text-[11px] leading-5 text-slate-500">
+        <span className="text-[11px] leading-5 text-slate-500 dark:text-slate-500">
           {followSource
             ? `跟随 ${followSource.key}：它 −/＋ 时，这个变量同步 −/＋（同幅度，单向）`
             : ""}
         </span>
         {followers.length > 0 && (
-          <span className="rounded-full border border-cyan-800/60 bg-cyan-950/30 px-2 py-0.5 font-mono text-[10px] text-cyan-400">
+          <span className="rounded-full border border-cyan-300 bg-cyan-50 px-2 py-0.5 font-mono text-[10px] text-cyan-700 dark:border-cyan-800/60 dark:bg-cyan-950/30 dark:text-cyan-400">
             被 {followers.map((v) => v.key).join("、")} 跟随
           </span>
         )}
@@ -622,7 +884,7 @@ function ComputedRow({
 
   return (
     <div
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2.5"
+      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40"
       onFocusCapture={() => (editing.current = true)}
       onBlurCapture={() => (editing.current = false)}
     >
@@ -630,27 +892,29 @@ function ComputedRow({
         value={draft.key}
         onChange={(e) => commit({ key: e.target.value })}
         title="引用名：模板和其它表达式里用 {B1} 这样引用"
-        className="w-14 rounded-lg border border-cyan-800/60 bg-slate-950 px-2 py-1 text-center font-mono text-xs text-cyan-300 outline-none transition focus:border-cyan-500"
+        className="w-14 rounded-lg border border-cyan-300 bg-white px-2 py-1 text-center font-mono text-xs text-cyan-700 outline-none transition focus:border-cyan-500 dark:border-cyan-800/60 dark:bg-slate-950 dark:text-cyan-300"
       />
-      <span className="text-slate-600">=</span>
+      <span className="text-slate-400 dark:text-slate-600">=</span>
       <input
         value={draft.name}
         onChange={(e) => commit({ name: e.target.value })}
         placeholder="名字，如：总胜率"
-        className="w-24 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-200 outline-none transition focus:border-indigo-500"
+        className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
       />
       <input
         value={draft.expr}
         onChange={(e) => commit({ expr: e.target.value })}
         placeholder="表达式，如：A1 + A2"
-        className={`min-w-32 flex-1 rounded-lg border bg-slate-950 px-2 py-1 font-mono text-sm outline-none transition ${
-          preview === null ? "border-rose-700/60 text-rose-300" : "border-slate-700 text-slate-200 focus:border-indigo-500"
+        className={`min-w-32 flex-1 rounded-lg border bg-white px-2 py-1 font-mono text-sm outline-none transition dark:bg-slate-950 ${
+          preview === null
+            ? "border-rose-400 text-rose-600 dark:border-rose-700/60 dark:text-rose-300"
+            : "border-slate-300 text-slate-800 focus:border-indigo-500 dark:border-slate-700 dark:text-slate-200"
         }`}
       />
       <select
         value={draft.format}
         onChange={(e) => commit({ format: e.target.value === "percent" ? "percent" : "plain" }, true)}
-        className="rounded-lg border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-300 outline-none"
+        className="rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
       >
         <option value="plain">普通数</option>
         <option value="percent">百分比</option>
@@ -659,7 +923,7 @@ function ComputedRow({
         value={draft.decimals}
         onChange={(e) => commit({ decimals: Number(e.target.value) }, true)}
         title="小数点位数"
-        className="rounded-lg border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-xs text-slate-300 outline-none"
+        className="rounded-lg border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
       >
         {[0, 1, 2, 3].map((n) => (
           <option key={n} value={n}>
@@ -669,7 +933,7 @@ function ComputedRow({
       </select>
       <span
         className={`min-w-16 text-right font-mono text-sm tabular-nums ${
-          preview === null ? "text-rose-400" : "text-cyan-300"
+          preview === null ? "text-rose-500 dark:text-rose-400" : "text-cyan-700 dark:text-cyan-300"
         }`}
         title="实时预览"
       >
@@ -701,17 +965,25 @@ function Toggle({
   tone?: "default" | "amber";
 }) {
   const onCls = tone === "amber"
-    ? "border-amber-500/50 bg-amber-500/15 text-amber-300"
-    : "border-cyan-500/50 bg-cyan-500/15 text-cyan-300";
+    ? "border-amber-500/50 bg-amber-500/15 text-amber-700 dark:text-amber-300"
+    : "border-cyan-500/50 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300";
   return (
     <button
       onClick={onClick}
       className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${
-        on ? onCls : "border-slate-700 bg-slate-950/60 text-slate-400 hover:text-slate-200"
+        on
+          ? onCls
+          : "border-slate-300 bg-white/60 text-slate-500 hover:text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-400 dark:hover:text-slate-200"
       }`}
     >
       <span
-        className={`h-2 w-2 rounded-full ${on ? (tone === "amber" ? "bg-amber-400" : "bg-cyan-400") : "bg-slate-600"}`}
+        className={`h-2 w-2 rounded-full ${
+          on
+            ? tone === "amber"
+              ? "bg-amber-500 dark:bg-amber-400"
+              : "bg-cyan-500 dark:bg-cyan-400"
+            : "bg-slate-400 dark:bg-slate-600"
+        }`}
       />
       {label}
     </button>
@@ -724,8 +996,8 @@ function MiniToggle({ label, on, onClick }: { label: string; on: boolean; onClic
       onClick={onClick}
       className={`rounded-lg border px-2.5 py-1 text-xs transition ${
         on
-          ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-300"
-          : "border-slate-700 bg-slate-950/60 text-slate-500 hover:text-slate-300"
+          ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+          : "border-slate-300 bg-white/60 text-slate-500 hover:text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-500 dark:hover:text-slate-300"
       }`}
     >
       {on ? "✓ " : ""}
@@ -768,7 +1040,7 @@ function NumberField({
   };
 
   return (
-    <label className={`block text-xs text-slate-400 ${wide ? "w-24" : ""}`}>
+    <label className={`block text-xs text-slate-500 dark:text-slate-400 ${wide ? "w-24" : ""}`}>
       {label}
       <input
         type="number"
@@ -786,7 +1058,7 @@ function NumberField({
             (e.target as HTMLInputElement).blur();
           }
         }}
-        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/60 px-2 py-1.5 font-mono text-sm text-slate-200 outline-none transition focus:border-indigo-500"
+        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 font-mono text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
       />
     </label>
   );
@@ -841,25 +1113,25 @@ function InlineNumber({
             (e.target as HTMLInputElement).blur();
           }
         }}
-        className="w-20 rounded-lg border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-sm text-slate-200 outline-none transition focus:border-indigo-500"
+        className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 font-mono text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
       />
-      {suffix && <span className="text-xs text-slate-600">{suffix}</span>}
+      {suffix && <span className="text-xs text-slate-400 dark:text-slate-600">{suffix}</span>}
     </span>
   );
 }
 
 function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
-    <label className="block text-xs text-slate-400">
+    <label className="block text-xs text-slate-500 dark:text-slate-400">
       {label}
       <span className="mt-1 flex items-center gap-2">
         <input
           type="color"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-8 w-12 cursor-pointer rounded border border-slate-700 bg-slate-950"
+          className="h-8 w-12 cursor-pointer rounded border border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-950"
         />
-        <span className="font-mono text-xs text-slate-500">{value}</span>
+        <span className="font-mono text-xs text-slate-400 dark:text-slate-500">{value}</span>
       </span>
     </label>
   );

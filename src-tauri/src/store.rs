@@ -87,6 +87,8 @@ pub struct OverlayConfig {
     pub max_width: i64,
     /// 创建时间（毫秒时间戳）
     pub created_at: i64,
+    /// 最后修改时间（毫秒时间戳；改名称/账号/模板/样式或开关时更新，拖动位置不算）
+    pub updated_at: i64,
     /// 本套自己的自定义变量
     pub variables: Vec<UserVar>,
     /// 本套自己的计算变量
@@ -237,7 +239,8 @@ CREATE TABLE IF NOT EXISTS overlays (
     bg_opacity     INTEGER NOT NULL DEFAULT 55,
     wrap           INTEGER NOT NULL DEFAULT 1,
     max_width      INTEGER NOT NULL DEFAULT 460,
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS variables (
     id          INTEGER PRIMARY KEY,
@@ -274,6 +277,23 @@ impl Store {
             .map_err(|e| e.to_string())?;
         conn.execute_batch(CREATE_SQL)
             .map_err(|e| format!("建表失败：{e}"))?;
+
+        // 轻量迁移：v0.0.9 起记录最后修改时间。老库补列并把已有记录回填为
+        // 创建时间（比 0 更有意义）；新库建表时已带列，这里跳过。
+        let has_updated_at: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('overlays') WHERE name = 'updated_at'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("检查表结构失败：{e}"))?;
+        if has_updated_at == 0 {
+            conn.execute_batch(
+                "ALTER TABLE overlays ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+                 UPDATE overlays SET updated_at = created_at WHERE updated_at = 0;",
+            )
+            .map_err(|e| format!("迁移 overlays.updated_at 失败：{e}"))?;
+        }
 
         let store = Self {
             conn: Mutex::new(conn),
@@ -369,7 +389,7 @@ impl Store {
         };
         let mut overlays = Vec::new();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at FROM overlays ORDER BY id",
+            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at, updated_at FROM overlays ORDER BY id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -397,6 +417,7 @@ impl Store {
                 wrap: row.get::<_, i64>(15)? != 0,
                 max_width: row.get(16)?,
                 created_at: row.get(17)?,
+                updated_at: row.get(18)?,
                 variables: vec![],
                 computed: vec![],
             })
@@ -443,16 +464,16 @@ impl Store {
 
     /// 更新浮窗的名称/账号/模板/样式（**有意不更新 x/y**——位置只由拖动回写和
     /// move_overlay 维护，避免主窗口表单里过期的坐标把用户刚拖好的位置弹回去）。
-    /// 变量有独立命令，这里不碰。
+    /// 变量有独立命令，这里不碰。同时刷新最后修改时间。
     pub fn update_overlay(&self, cfg: &OverlayConfig) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE overlays SET name = ?1, account = ?2, template = ?3, font_size = ?4, font_color = ?5, bold = ?6, shadow = ?7, bg_color = ?8, bg_opacity = ?9, wrap = ?10, max_width = ?11 WHERE id = ?12",
+                "UPDATE overlays SET name = ?1, account = ?2, template = ?3, font_size = ?4, font_color = ?5, bold = ?6, shadow = ?7, bg_color = ?8, bg_opacity = ?9, wrap = ?10, max_width = ?11, updated_at = ?12 WHERE id = ?13",
                 params![
                     cfg.name, cfg.account.trim(), cfg.template, cfg.font_size as i64, cfg.font_color,
                     cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-                    cfg.wrap as i64, cfg.max_width, cfg.id
+                    cfg.wrap as i64, cfg.max_width, now_ms(), cfg.id
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -495,12 +516,13 @@ impl Store {
         apply(&mut probe);
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE overlays SET shown = ?2, always_on_top = ?3, click_through = ?4 WHERE id = ?1",
+            "UPDATE overlays SET shown = ?2, always_on_top = ?3, click_through = ?4, updated_at = ?5 WHERE id = ?1",
             params![
                 id,
                 probe.shown as i64,
                 probe.always_on_top as i64,
-                probe.click_through as i64
+                probe.click_through as i64,
+                now_ms()
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -813,14 +835,14 @@ impl Store {
 /// 写入一条浮窗记录（新浮窗与空库初始化共用）。
 fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             cfg.id, cfg.name, cfg.account, cfg.template,
             cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
             cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
             cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-            cfg.wrap as i64, cfg.max_width, cfg.created_at
+            cfg.wrap as i64, cfg.max_width, cfg.created_at, cfg.updated_at
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -971,6 +993,7 @@ pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
         wrap: true,
         max_width: 460,
         created_at,
+        updated_at: created_at,
         variables: vec![],
         computed: vec![],
     }

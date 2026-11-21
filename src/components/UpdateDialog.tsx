@@ -27,9 +27,9 @@ type Phase = "checking" | "up-to-date" | "available" | "downloading" | "ready" |
 const BTN_PRIMARY =
   "flex-1 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400";
 const BTN_SECONDARY =
-  "flex-1 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-500 hover:text-slate-100";
+  "flex-1 rounded-xl border border-slate-300 bg-white/70 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300 dark:hover:border-slate-500 dark:hover:text-slate-100";
 const BTN_DANGER =
-  "flex-1 rounded-xl border border-rose-500/50 bg-rose-950/40 px-4 py-2 text-sm font-medium text-rose-300 transition hover:bg-rose-500/20";
+  "flex-1 rounded-xl border border-rose-500/50 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-500/20 dark:bg-rose-950/40 dark:text-rose-300";
 
 function errorMessage(e: unknown): string {
   if (e instanceof Error && e.message) return e.message;
@@ -176,15 +176,15 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
       onClick={requestClose}
     >
       <div
-        className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h3 className="text-base font-semibold text-slate-100">检查更新</h3>
+          <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">检查更新</h3>
           <button
             onClick={requestClose}
             aria-label="关闭"
-            className="text-slate-500 transition hover:text-slate-200"
+            className="text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-200"
           >
             ✕
           </button>
@@ -192,15 +192,15 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
 
         <div className="mt-4 min-h-[7.5rem] space-y-3 text-sm">
           {phase === "checking" && (
-            <div className="flex items-center gap-3 text-slate-400">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-indigo-400" />
+            <div className="flex items-center gap-3 text-slate-500 dark:text-slate-400">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-400 dark:border-slate-600" />
               正在连接 GitHub 检查更新…
             </div>
           )}
 
           {phase === "up-to-date" && info && (
             <div>
-              <p className="font-medium text-emerald-400">✓ 当前已是最新版本</p>
+              <p className="font-medium text-emerald-600 dark:text-emerald-400">✓ 当前已是最新版本</p>
               <p className="mt-1 text-xs text-slate-500">
                 当前版本 v{info.currentVersion} · GitHub 最新 v{info.latestVersion || "—"}
               </p>
@@ -210,12 +210,12 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
           {phase === "available" && info && (
             <div className="space-y-3">
               <div>
-                <p className="font-medium text-indigo-300">发现新版本 v{info.latestVersion}</p>
+                <p className="font-medium text-indigo-700 dark:text-indigo-300">发现新版本 v{info.latestVersion}</p>
                 <p className="mt-1 text-xs text-slate-500">当前版本 v{info.currentVersion}</p>
               </div>
-              {notice && <p className="text-xs text-amber-400">{notice}</p>}
+              {notice && <p className="text-xs text-amber-600 dark:text-amber-400">{notice}</p>}
               {info.notes && (
-                <div className="max-h-28 overflow-y-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs leading-5 text-slate-400">
+                <div className="max-h-28 overflow-y-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-500 dark:border-slate-800 dark:bg-slate-950/60 dark:text-slate-400">
                   {info.notes}
                 </div>
               )}
@@ -223,7 +223,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                 <select
                   value={assetIndex}
                   onChange={(e) => setAssetIndex(Number(e.target.value))}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
                 >
                   {info.assets.map((a, i) => (
                     <option key={a.url} value={i}>
@@ -238,7 +238,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                   {selected.size ? ` · ${(selected.size / 1048576).toFixed(1)} MB` : ""}
                 </p>
               ) : (
-                <p className="text-xs text-amber-400">该版本暂无安装包，请打开发布页手动下载。</p>
+                <p className="text-xs text-amber-600 dark:text-amber-400">该版本暂无安装包，请打开发布页手动下载。</p>
               )}
               <label className="block space-y-1">
                 <span className="text-xs text-slate-500">
@@ -248,7 +248,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                 <select
                   value={activeLine.prefix}
                   onChange={(e) => chooseLine(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
                 >
                   {lines.map((l) => (
                     <option key={l.prefix} value={l.prefix}>
@@ -257,7 +257,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                   ))}
                 </select>
                 {!linesLive && (
-                  <span className="block text-[11px] text-slate-600">
+                  <span className="block text-[11px] text-slate-500 dark:text-slate-600">
                     实时节点榜获取失败，当前为内置线路；下载失败可换线路或直连重试。
                   </span>
                 )}
@@ -267,11 +267,11 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
 
           {phase === "downloading" && (
             <div className="space-y-2">
-              <p className="text-slate-300">
+              <p className="text-slate-700 dark:text-slate-300">
                 正在下载安装包…
                 <span className="ml-1 text-xs text-slate-500">（{activeLine.label}）</span>
               </p>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                 <div
                   className={`h-full rounded-full bg-indigo-500 transition-all ${
                     progress.total > 0 ? "" : "w-full animate-pulse"
@@ -284,13 +284,13 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                   ? `${pct}% · ${(progress.downloaded / 1048576).toFixed(1)} / ${(progress.total / 1048576).toFixed(1)} MB`
                   : `已下载 ${(progress.downloaded / 1048576).toFixed(1)} MB`}
               </p>
-              <p className="text-xs text-slate-600">下载可能较慢，可随时取消。</p>
+              <p className="text-xs text-slate-400 dark:text-slate-600">下载可能较慢，可随时取消。</p>
             </div>
           )}
 
           {phase === "ready" && (
             <div>
-              <p className="font-medium text-emerald-400">✓ 下载完成</p>
+              <p className="font-medium text-emerald-600 dark:text-emerald-400">✓ 下载完成</p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
                 点击「立即安装」将原地替换安装并退出本程序（桌面图标及其位置保持不变），
                 安装进度窗口会自动关闭，完成后请重新打开。
@@ -300,14 +300,14 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
 
           {phase === "error" && (
             <div className="space-y-1">
-              <p className="font-medium text-rose-400">检查 / 下载失败</p>
-              <p className="break-all text-xs leading-5 text-slate-400">{error}</p>
+              <p className="font-medium text-rose-600 dark:text-rose-400">检查 / 下载失败</p>
+              <p className="break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{error}</p>
               {activeLine.prefix && (
-                <p className="text-xs text-amber-400">
+                <p className="text-xs text-amber-600 dark:text-amber-400">
                   当前线路「{activeLine.label}」可能失效，回「检查更新」换一条线路或直连重试。
                 </p>
               )}
-              <p className="text-xs text-slate-600">
+              <p className="text-xs text-slate-400 dark:text-slate-600">
                 GitHub 在国内可能连不上，可打开发布页手动下载。
               </p>
             </div>

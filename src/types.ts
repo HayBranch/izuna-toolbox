@@ -64,6 +64,8 @@ export interface OverlayConfig {
   maxWidth: number;
   /** 创建时间（毫秒时间戳） */
   createdAt: number;
+  /** 最后修改时间（毫秒时间戳；拖动位置不算修改） */
+  updatedAt: number;
   /** 本套自己的自定义变量 */
   variables: UserVar[];
   /** 本套自己的计算变量 */
