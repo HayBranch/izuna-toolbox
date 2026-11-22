@@ -2,12 +2,11 @@
  * 悬浮字幕页 —— 两级界面：
  * 1) 列表：一眼看到每套浮窗的基本信息（名称 / 创建 / 最后修改 / 显示 / 置顶 / 鼠标穿透），
  *    点一行进入这一套的配置；
- * 2) 详情：这一套浮窗的全部配置（变量、模板、样式、预览）。左上角返回列表，
- *    右上角 ℹ️ 悬浮显示基本信息。
+ * 2) 详情：这一套浮窗的全部配置（变量、模板、样式、预览）。左上角返回列表。
  *
  * 每张卡片 = 一套完全独立的浮窗（各自的变量、计算变量、账号、模板与样式）。
  * 卡片分区（从上到下）：
- * - 头部：返回 + 名称 + 创建时间 + 显示/置顶/鼠标穿透开关 + 信息/保存/删除
+ * - 头部：返回 + 名称 + 创建时间 + 显示/置顶/鼠标穿透开关 + 保存/删除
  * - 变量：自定义变量（−/＋ 计数，可设置跟随联动）+ 计算变量（表达式），都是这一套自己的
  * - 显示内容：账号 + 模板（回车即换行；点芯片插入变量；↵ 插入换行）
  * - 外观：字号/颜色/加粗/描边/背景 + 自动换行与最大宽度
@@ -316,7 +315,7 @@ function OverlayEditor({
         }
       }}
     >
-      {/* 头部：返回 + 名称 + 创建时间 + 三个开关 + 信息/保存/删除 */}
+      {/* 头部：返回 + 名称 + 创建时间 + 三个开关 + 保存/删除 */}
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
@@ -356,7 +355,6 @@ function OverlayEditor({
           onClick={() => run(setOverlayClickThrough(overlay.id, !overlay.clickThrough))}
         />
         <div className="ml-auto flex items-center gap-2">
-          <InfoButton overlay={overlay} />
           <span
             className={`text-xs ${
               saveState === "error"
@@ -598,56 +596,7 @@ function OverlayEditor({
   );
 }
 
-// ---------- 基本信息 ----------
-
-/** 卡片右上角「关于」按钮：悬浮（或键盘聚焦）时显示这套浮窗的基本信息 */
-function InfoButton({ overlay }: { overlay: OverlayConfig }) {
-  const updated = overlay.updatedAt || overlay.createdAt;
-  return (
-    <span className="group relative shrink-0">
-      <button
-        type="button"
-        aria-label="关于这套浮窗"
-        title="悬浮查看基本信息"
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 text-sm text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
-      >
-        ℹ️
-      </button>
-      <div
-        role="tooltip"
-        className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs opacity-0 shadow-2xl transition group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100 dark:border-slate-700 dark:bg-slate-900"
-      >
-        <p className="truncate font-medium text-slate-800 dark:text-slate-100">
-          {overlay.name || "未命名浮窗"}
-        </p>
-        <dl className="mt-2 space-y-1">
-          <InfoLine label="创建时间" value={formatDateTime(overlay.createdAt)} />
-          <InfoLine label="最后修改" value={formatDateTime(updated)} />
-          <InfoLine label="是否显示" value={overlay.shown ? "显示中" : "已隐藏"} />
-          <InfoLine label="置顶" value={overlay.alwaysOnTop ? "是" : "否"} />
-          <InfoLine
-            label="鼠标穿透"
-            value={overlay.clickThrough ? "已开启（锁定）" : "关闭"}
-          />
-          <InfoLine label="位置" value={`X ${overlay.x} · Y ${overlay.y}`} />
-          <InfoLine
-            label="变量"
-            value={`${overlay.variables.length} 自定义 · ${overlay.computed.length} 计算`}
-          />
-        </dl>
-      </div>
-    </span>
-  );
-}
-
-function InfoLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <dt className="shrink-0 text-slate-400 dark:text-slate-500">{label}</dt>
-      <dd className="text-right text-slate-600 dark:text-slate-300">{value}</dd>
-    </div>
-  );
-}
+// ---------- 列表控件 ----------
 
 /** 列表里的状态开关标签（点击直接切换，不用进详情） */
 function ChipToggle({

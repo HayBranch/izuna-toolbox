@@ -5,7 +5,7 @@
  * 1. 监听 config-changed 事件 + 启动时 get_config，按自己的 id 渲染模板；
  * 2. 用 ResizeObserver 量内容尺寸，调 set_overlay_size 让窗口贴合内容；
  * 3. 每 30s 刷新一次时间类变量（{today} 跨天也能自动更新）；
- * 4. 未开鼠标穿透时，悬停显示小工具条：切换置顶 / 锁定穿透 / 隐藏，
+ * 4. 未开鼠标穿透时，悬停显示小工具条：关于（悬浮看基本信息）/ 置顶 / 锁定穿透 / 隐藏，
  *    穿透开启后浮窗收不到鼠标事件，只能回主窗口解锁（主窗口始终可以控制）。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -20,6 +20,7 @@ import {
   subscribeConfig,
 } from "../api";
 import type { AppConfig } from "../types";
+import { formatDateTime } from "../utils";
 import { computeVars } from "../vars";
 import SubtitleView from "./SubtitleView";
 
@@ -106,12 +107,25 @@ export default function OverlayWindow() {
   if (!cfg) return null;
   const interactive = !cfg.clickThrough;
 
+  // 右上角 ℹ️ 的悬浮信息：原样搬自主窗口卡片，改成浮窗自身的原生 tooltip。
+  // 浮窗尺寸只包住字幕，自定义浮层会被窗口裁掉，所以这里用 title 多行文本。
+  const info = [
+    cfg.name || "未命名浮窗",
+    `创建 ${formatDateTime(cfg.createdAt)} · 修改 ${formatDateTime(cfg.updatedAt || cfg.createdAt)}`,
+    `${cfg.shown ? "显示中" : "已隐藏"} · ${cfg.alwaysOnTop ? "置顶" : "不置顶"} · 鼠标穿透${cfg.clickThrough ? "已开启" : "关闭"}`,
+    `位置 X ${cfg.x} · Y ${cfg.y}`,
+    `变量 ${cfg.variables.length} 自定义 · ${cfg.computed.length} 计算`,
+  ].join("\n");
+
   return (
     <div className="group relative">
       <SubtitleView cfg={cfg} vars={vars} interactive={interactive} boxRef={boxRef} />
 
       {interactive && (
         <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <OverlayToolButton title={info} ariaLabel="关于这套浮窗">
+            ℹ️
+          </OverlayToolButton>
           <OverlayToolButton
             title={cfg.alwaysOnTop ? "点击取消置顶" : "点击置顶"}
             onClick={() => setOverlayAlwaysTop(id, !cfg.alwaysOnTop).catch(console.warn)}
@@ -138,16 +152,19 @@ export default function OverlayWindow() {
 
 function OverlayToolButton({
   title,
+  ariaLabel,
   onClick,
   children,
 }: {
   title: string;
-  onClick: () => void;
+  ariaLabel?: string;
+  onClick?: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
       title={title}
+      aria-label={ariaLabel}
       onClick={onClick}
       className="flex h-6 w-6 items-center justify-center rounded-full border border-slate-500/60 bg-slate-900/85 text-[11px] leading-none text-slate-300 shadow transition hover:border-cyan-400 hover:text-white"
     >
