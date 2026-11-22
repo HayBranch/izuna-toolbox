@@ -26,6 +26,7 @@ import {
   deleteOverlay,
   deleteVariable,
   moveOverlay,
+  resizeOverlay,
   setOverlayAlwaysTop,
   setOverlayClickThrough,
   setOverlayShown,
@@ -571,7 +572,7 @@ function OverlayEditor({
             </div>
             <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-600">
               {draft.wrap
-                ? "模板里的回车换行；超过最大宽度的长行自动折行，浮窗高度自适应。"
+                ? "自动模式：模板里的回车换行；超过最大宽度的长行折行。直接拖动浮窗边缘可改成固定宽高。"
                 : "只有模板里的回车会换行；长行保持一行（超过屏幕会被截断）。"}
             </p>
           </div>
@@ -583,12 +584,34 @@ function OverlayEditor({
           <div className="flex min-h-40 flex-1 overflow-auto rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-900 via-slate-900 to-indigo-950 p-4 dark:border-slate-800">
             <div className="m-auto"><SubtitleView cfg={draft} vars={vars} /></div>
           </div>
-          <div className="mt-3 flex items-center gap-3">
+          <div className="mt-3 flex flex-wrap items-center gap-3">
             <NumberField label="位置 X" value={overlay.x} min={-9999} max={9999} wide
               onChange={(v) => run(moveOverlay(overlay.id, v, overlay.y))} />
             <NumberField label="位置 Y" value={overlay.y} min={-9999} max={9999} wide
               onChange={(v) => run(moveOverlay(overlay.id, overlay.x, v))} />
             <span className="text-xs text-slate-400 dark:text-slate-500">拖动浮窗自动保存</span>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-slate-500 dark:text-slate-400">
+              尺寸{" "}
+              <span className="font-mono text-cyan-700 dark:text-cyan-300">
+                {overlay.width > 0 && overlay.height > 0
+                  ? `${overlay.width} × ${overlay.height}`
+                  : "自动按内容"}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => run(resizeOverlay(overlay.id, 0, 0))}
+              disabled={!(overlay.width > 0 && overlay.height > 0)}
+              title="恢复为按内容自动调整宽高"
+              className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 disabled:cursor-default disabled:opacity-40 disabled:hover:border-slate-300 disabled:hover:text-slate-500 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+            >
+              恢复自动尺寸
+            </button>
+            <span className="text-slate-400 dark:text-slate-600">
+              直接拖动浮窗的边缘 / 角落即可改宽高
+            </span>
           </div>
         </div>
       </div>

@@ -14,12 +14,15 @@ export default function SubtitleView({
   cfg,
   vars,
   interactive = false,
+  fill = false,
   boxRef,
 }: {
   cfg: OverlayConfig;
   vars: Vars;
   /** 是否允许拖拽（浮窗本体且未锁定穿透时为 true） */
   interactive?: boolean;
+  /** 手动尺寸模式：撑满窗口（宽度决定折行，高度裁掉溢出内容） */
+  fill?: boolean;
   /** 挂到字幕外框上的 ref：浮窗用它测量真实内容尺寸 */
   boxRef?: Ref<HTMLDivElement>;
 }) {
@@ -39,20 +42,28 @@ export default function SubtitleView({
     padding: `${SUBTITLE_PAD.y}px ${SUBTITLE_PAD.x}px`,
     lineHeight: 1.5,
     // pre：仅模板里的回车换行；pre-wrap：回车 + 长行按最大宽度折行
-    whiteSpace: cfg.wrap ? "pre-wrap" : "pre",
+    whiteSpace: fill || cfg.wrap ? "pre-wrap" : "pre",
     // 关键：按内容真实宽度排版，不受当前窗口宽度反向约束。
     // 否则窗口从小尺寸起步时，文字先按窄窗口折行，测量结果永远长不大，
     // 最大宽度调大也看不出效果。maxWidth 负责真正的宽度上限。
-    width: "max-content",
-    maxWidth: cfg.wrap && cfg.maxWidth > 0 ? cfg.maxWidth : undefined,
+    width: fill ? "100%" : "max-content",
+    height: fill ? "100%" : undefined,
+    maxWidth: fill ? "none" : cfg.wrap && cfg.maxWidth > 0 ? cfg.maxWidth : undefined,
     // 超宽的连续字符（无空格长串）也强制折进最大宽度内
-    overflowWrap: cfg.wrap ? "anywhere" : undefined,
+    overflowWrap: fill || cfg.wrap ? "anywhere" : undefined,
+    overflow: fill ? "hidden" : undefined,
+    boxSizing: fill ? "border-box" : undefined,
     userSelect: "none",
     cursor: interactive ? "default" : "inherit",
   };
 
   return (
-    <div ref={boxRef} style={style} {...dragProps} className="inline-block">
+    <div
+      ref={boxRef}
+      style={style}
+      {...dragProps}
+      className={fill ? "block" : "inline-block"}
+    >
       <span>
         {tokens.map((t, i) =>
           t.isVar ? (

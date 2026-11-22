@@ -177,6 +177,7 @@ pub fn run() {
             commands::set_overlay_click_through,
             commands::delete_overlay,
             commands::set_overlay_size,
+            commands::resize_overlay,
             commands::set_main_always_on_top,
             commands::open_url,
             updater::download_update,

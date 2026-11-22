@@ -62,6 +62,9 @@ export interface OverlayConfig {
   wrap: boolean;
   /** 自动换行最大宽度（逻辑像素） */
   maxWidth: number;
+  /** 手动尺寸（逻辑像素；0 = 自动按内容，>0 时窗口固定大小） */
+  width: number;
+  height: number;
   /** 创建时间（毫秒时间戳） */
   createdAt: number;
   /** 最后修改时间（毫秒时间戳；拖动位置不算修改） */

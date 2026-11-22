@@ -132,8 +132,22 @@ pub fn set_overlay_size(
         .get_webview_window(&overlay_win::overlay_label(id))
         .ok_or("浮窗窗口不存在")?;
 
-    let mut w = width.round().max(40.0);
-    let h = height.round().max(28.0);
+    let cfg = store.get().overlays.into_iter().find(|o| o.id == id);
+    // 手动尺寸优先：浮窗被拖动过宽高后，内容自适应不再覆盖它
+    let manual = cfg
+        .as_ref()
+        .map(|c| c.width > 0 && c.height > 0)
+        .unwrap_or(false);
+    let mut w = if manual {
+        cfg.as_ref().map(|c| c.width as f64).unwrap_or(40.0)
+    } else {
+        width.round().max(40.0)
+    };
+    let h = if manual {
+        cfg.as_ref().map(|c| c.height as f64).unwrap_or(28.0)
+    } else {
+        height.round().max(28.0)
+    };
     // 不允许浮窗比所在显示器还宽
     if let Ok(Some(monitor)) = win.current_monitor() {
         let scale = monitor.scale_factor();
@@ -150,10 +164,43 @@ pub fn set_overlay_size(
     // 量好尺寸后走统一的窗口状态同步（含置顶策略）再决定显隐：
     // 不能直接 win.show()——那会让浮窗跳过"主窗口在前台时取消置顶"的判断，
     // 一显示就可能以置顶态盖住主窗口、拦截点击。
-    if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+    if let Some(cfg) = cfg {
         overlay_win::apply_window_state(&app, &win, &cfg, false)?;
     }
     Ok(())
+}
+
+/// 保存浮窗的手动宽高（逻辑像素）。浮窗拖动边缘后回写；主窗口传 0/0 可恢复自动。
+#[tauri::command(async)]
+pub fn resize_overlay(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    width: i64,
+    height: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_permission(&window, id)?;
+    // 0/0 = 自动按内容；只要有一个为 0 也按自动处理，避免出现半手动状态
+    let (w, h) = if width > 0 && height > 0 {
+        (width.max(40), height.max(28))
+    } else {
+        (0, 0)
+    };
+    store.set_size(id, w, h)?;
+
+    if let Some(win) = app.get_webview_window(&overlay_win::overlay_label(id)) {
+        if w > 0 && h > 0 {
+            win.set_size(tauri::LogicalSize::new(w as f64, h as f64))
+                .map_err(|e| format!("调整浮窗尺寸失败：{e}"))?;
+            overlay_win::mark_measured(&app, id);
+        }
+        // 恢复自动时不主动改大小：浮窗页面收到 config-changed 后会重新量内容。
+        if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+            overlay_win::apply_window_state(&app, &win, &cfg, false)?;
+        }
+    }
+    changed(&app, &store)
 }
 
 // 下面三个开关命令独立出来：浮窗自身的悬停小工具条和主窗口的开关都只改一个布尔值。

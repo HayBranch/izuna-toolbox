@@ -63,11 +63,23 @@ pub fn create_overlay_window(app: &AppHandle, cfg: &OverlayConfig) -> Result<(),
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(format!("泉奈浮窗 · {}", cfg.name))
         .visible(false) // 先隐藏，防止加载时闪烁
-        .inner_size(160.0, 44.0) // 极小起步：显示门槛由"量好尺寸"把关（见下）
+        .inner_size(
+            if cfg.width > 0 && cfg.height > 0 {
+                cfg.width as f64
+            } else {
+                160.0
+            },
+            if cfg.width > 0 && cfg.height > 0 {
+                cfg.height as f64
+            } else {
+                44.0
+            },
+        ) // 自动模式极小起步；手动模式直接用保存的尺寸
+        .min_inner_size(40.0, 28.0)
         .decorations(false) // 无边框
         .transparent(true) // 背景透明，圆角/半透明背景由页面 CSS 画出
         .shadow(false) // 关键：透明窗口必须关阴影，否则直播捕获会有黑边
-        .resizable(false)
+        .resizable(true) // 允许从页面边缘拖动改宽高（startResizeDragging）
         .maximizable(false)
         .minimizable(false)
         .skip_taskbar(true)

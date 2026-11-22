@@ -68,6 +68,10 @@ export const deleteOverlay = (id: number) =>
 export const setOverlaySize = (width: number, height: number) =>
   invoke<void>("set_overlay_size", { width, height });
 
+/** 保存浮窗手动宽高（逻辑像素）；传 0/0 恢复自动按内容 */
+export const resizeOverlay = (id: number, width: number, height: number) =>
+  cfged(invoke<AppConfig>("resize_overlay", { id, width, height }));
+
 // ---------- 套内：自定义变量 / 计算变量 ----------
 // （账号只是浮窗的一个字段，走 updateOverlay 整卡保存）
 

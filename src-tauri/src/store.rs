@@ -85,6 +85,9 @@ pub struct OverlayConfig {
     pub wrap: bool,
     /// 自动换行最大宽度（逻辑像素；<=0 表示不限制）
     pub max_width: i64,
+    /// 手动尺寸（逻辑像素；0 = 自动按内容，>0 时固定窗口大小）
+    pub width: i64,
+    pub height: i64,
     /// 创建时间（毫秒时间戳）
     pub created_at: i64,
     /// 最后修改时间（毫秒时间戳；改名称/账号/模板/样式或开关时更新，拖动位置不算）
@@ -239,6 +242,8 @@ CREATE TABLE IF NOT EXISTS overlays (
     bg_opacity     INTEGER NOT NULL DEFAULT 55,
     wrap           INTEGER NOT NULL DEFAULT 1,
     max_width      INTEGER NOT NULL DEFAULT 460,
+    width          INTEGER NOT NULL DEFAULT 0,
+    height         INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL DEFAULT 0
 );
@@ -293,6 +298,23 @@ impl Store {
                  UPDATE overlays SET updated_at = created_at WHERE updated_at = 0;",
             )
             .map_err(|e| format!("迁移 overlays.updated_at 失败：{e}"))?;
+        }
+
+        // 轻量迁移：v0.1.0 起支持在浮窗上直接拖动宽高。老库补列，默认 0 = 自动。
+        for column in ["width", "height"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('overlays') WHERE name = ?1",
+                    params![column],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("检查表结构失败：{e}"))?;
+            if exists == 0 {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE overlays ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
+                ))
+                .map_err(|e| format!("迁移 overlays.{column} 失败：{e}"))?;
+            }
         }
 
         let store = Self {
@@ -389,7 +411,7 @@ impl Store {
         };
         let mut overlays = Vec::new();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at, updated_at FROM overlays ORDER BY id",
+            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at FROM overlays ORDER BY id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -416,8 +438,10 @@ impl Store {
                 bg_opacity: row.get::<_, i64>(14)? as u32,
                 wrap: row.get::<_, i64>(15)? != 0,
                 max_width: row.get(16)?,
-                created_at: row.get(17)?,
-                updated_at: row.get(18)?,
+                width: row.get(17)?,
+                height: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
                 variables: vec![],
                 computed: vec![],
             })
@@ -489,6 +513,21 @@ impl Store {
             .execute(
                 "UPDATE overlays SET x = ?1, y = ?2 WHERE id = ?3",
                 params![x, y, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("浮窗 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    /// 保存浮窗的手动尺寸（逻辑像素；0/0 = 恢复自动按内容）。
+    pub fn set_size(&self, id: i64, width: i64, height: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE overlays SET width = ?1, height = ?2, updated_at = ?3 WHERE id = ?4",
+                params![width, height, now_ms(), id],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -835,14 +874,14 @@ impl Store {
 /// 写入一条浮窗记录（新浮窗与空库初始化共用）。
 fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             cfg.id, cfg.name, cfg.account, cfg.template,
             cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
             cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
             cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-            cfg.wrap as i64, cfg.max_width, cfg.created_at, cfg.updated_at
+            cfg.wrap as i64, cfg.max_width, cfg.width, cfg.height, cfg.created_at, cfg.updated_at
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -992,6 +1031,8 @@ pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
         bg_opacity: 55,
         wrap: true,
         max_width: 460,
+        width: 0,
+        height: 0,
         created_at,
         updated_at: created_at,
         variables: vec![],
