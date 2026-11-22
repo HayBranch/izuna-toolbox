@@ -13,9 +13,9 @@ import izunaIcon from "./assets/izuna-icon.png";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
 import UpdateDialog from "./components/UpdateDialog";
+import { applyThemeMode, getThemeMode, setThemeMode, type ThemeMode } from "./theme";
 import type { AppConfig, MovedEvent } from "./types";
 import { checkForUpdate, markChecked, shouldStartupCheck, type UpdateInfo } from "./updater";
-import { applyThemeMode, getThemeMode, setThemeMode, type ThemeMode } from "./theme";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 const isOverlay = isTauri && getCurrentWindow().label.startsWith("overlay-");
