@@ -280,26 +280,40 @@ fn install_update_impl(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 生成一个 PowerShell 看门进程：等安装器退出 + 目标 exe 文件解锁后再启动它。
+/// 生成一个 PowerShell 看门进程：等安装器真正写完目标 exe 后再启动它。
 ///
-/// 判定「装完了」不能只靠安装器 PID（msiexec 会先派生提权子进程再退出），
-/// 所以额外轮询目标 exe 是否能独占打开——旧实例在跑、或安装器正在替换文件时
-/// 都会失败，只有文件真正就绪才启动。超时则放弃等待（用户手动打开即可）。
+/// 判定「装完了」不能靠安装器 PID：被动模式（NSIS `/UPDATE /P`）的引导进程会
+/// 提前退出、msiexec 更是先派生提权子进程再退出，「PID 没了」不代表文件已替换完。
+/// 也不能只看 exe 能否独占打开——旧实例 `app.exit(0)` 释放自身句柄后文件就可能
+/// 打得开，但安装器此刻可能仍在写入。若看门进程抢先启动，会和安装器抢单实例锁或
+/// 拿到写到一半的文件，导致装完不自动重启（v0.1.0 实测复现）。
+///
+/// 因此轮询三件事**连续两次**都成立才启动：exe 能独占打开（未被占用）、且
+/// `LastWriteTime` 与上一轮相同（安装器不再写入 = 替换完成）。任意一轮不满足就
+/// 重新计数。超时则放弃等待（用户手动打开即可）。
 #[cfg(windows)]
 fn relaunch_waiter_command(installer_pid: u32, exe_path: &str) -> std::process::Command {
     let quoted = exe_path.replace('\'', "''");
+    // Wait-Process 只是尽快跨过安装阶段（多半早已退出、立即返回）；
+    // 真正的就绪判定是后面的「文件解锁 + 写入时间连续稳定」。
     let script = format!(
         "$ErrorActionPreference='SilentlyContinue';\
          Wait-Process -Id {installer_pid} -Timeout 600;\
          $sw=[Diagnostics.Stopwatch]::StartNew();\
-         while($sw.Elapsed.TotalSeconds -lt 120){{\
+         $prev=[DateTime]::MinValue;\
+         $stable=0;\
+         while($sw.Elapsed.TotalSeconds -lt 180){{\
+           $ok=$false;\
            try{{\
              $f=[IO.File]::Open('{quoted}','Open','ReadWrite','None');\
-             $f.Close(); break\
+             $f.Close(); $ok=$true\
            }}catch{{}}\
-           Start-Sleep -Milliseconds 500\
-         }};\
-         Start-Process -FilePath '{quoted}'"
+           $cur=([IO.FileInfo]'{quoted}').LastWriteTime;\
+           if($ok -and $cur -eq $prev){{ $stable++ }}else{{ $stable=0 }}\
+           $prev=$cur;\
+           if($stable -ge 1){{ Start-Process -FilePath '{quoted}'; break }}\
+           Start-Sleep -Seconds 2\
+         }}"
     );
     let mut c = std::process::Command::new("powershell.exe");
     c.args([
