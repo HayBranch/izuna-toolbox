@@ -1,53 +1,60 @@
 # AGENTS.md
 
-Repo convention: comments, commit messages, README, and installer language are **Chinese (zh-CN)**. Match that when adding user-facing strings or commit messages.
+仓库约定：注释、提交信息、README、安装包文案一律使用**中文（zh-CN）**。新增面向用户的内容或提交信息时保持这一约定。
 
-## What this is
+## 项目是什么
 
-Tauri 2 desktop app (Windows-first): a floating-subtitle overlay tool whose subtitle windows are meant to be captured by OBS. Frontend React 19 + TS + Vite 7 + Tailwind 4; backend Rust with SQLite (`rusqlite` `bundled`). Single crate + single frontend, no workspace, no monorepo.
+Tauri 2 桌面应用（优先 Windows）：悬浮字幕浮窗工具，字幕窗口供 OBS 捕获。前端 React 19 + TS + Vite 7 + Tailwind 4；后端 Rust + SQLite（`rusqlite` `bundled`）。单 crate + 单前端，不用 workspace，不用 monorepo。
 
-## Commands
+## 常用命令
 
 ```bash
-npm install            # once
-npm run tauri dev      # dev: Vite on :1420 + cargo rebuild on Rust change
-npm run tauri build    # release build (plain exe + NSIS in src-tauri/target/release/bundle/)
-npm run bundle         # tauri build --bundles nsis,msi  (MSI is best-effort, often fails on CI — see below)
-npm run bundle:portable # build exe + node scripts/package-portable.mjs -> dist-portable/
-npm run bump -- 0.0.5  # bump root package.json version + sync package-lock; no commit, no tag
+npm install             # 首次安装
+npm run tauri dev       # 开发：Vite :1420 + Rust 改动自动重编译
+npm run tauri build     # 正式构建（普通 exe + NSIS，输出在 src-tauri/target/release/bundle/）
+npm run bundle          # tauri build --bundles nsis,msi（MSI 是 best-effort，CI 上常失败，见下文）
+npm run bundle:portable # 构建 exe 后用 node scripts/package-portable.mjs 打包到 dist-portable/
+npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；不提交、不打标签
 ```
 
-- There are **no tests, no lint, no formatter config** in this repo. `npm run build` runs `tsc` (strict, `noUnusedLocals`/`noUnusedParameters`) and is the only typecheck gate.
-- Vite dev server is pinned to port **1420** with `strictPort` — must be free, `tauri.conf.json` `devUrl` depends on it. `clearScreen: false` is intentional so Rust compiler errors stay visible; don't change it.
+- 仓库里**没有测试、lint、格式化配置**。`npm run build` 会跑 `tsc`（严格模式，`noUnusedLocals`/`noUnusedParameters`），是唯一的类型检查关卡。
+- Vite 开发服务器固定在 **1420** 端口（`strictPort`）——该端口必须空闲，`tauri.conf.json` 的 `devUrl` 依赖它。`clearScreen: false` 是有意为之，便于看到 Rust 编译错误；不要改动。
 
-## Version number
+## 版本号
 
-`package.json` `version` is the **single source of truth**:
-- `src-tauri/tauri.conf.json` has `"version": "../package.json"` (installer/exe version follows).
-- Frontend reads it via Vite `define.__APP_VERSION__`.
-- `src-tauri/Cargo.toml` version is a placeholder `0.0.0` — leave it alone.
+`package.json` 的 `version` 是**唯一来源**：
 
-Release flow: `npm run bump -- X.Y.Z` → commit → `git tag -a vX.Y.Z` → push tag. Tags `v*` trigger the release workflows.
+- `src-tauri/tauri.conf.json` 用 `"version": "../package.json"`（安装包/exe 版本跟着走）。
+- 前端通过 Vite `define.__APP_VERSION__` 读取。
+- `src-tauri/Cargo.toml` 的版本只是占位 `0.0.0`——不要动。
 
-## Release pipelines (two, for different hosts)
+发布流程：`npm run bump -- X.Y.Z` → 提交 → `git tag -a vX.Y.Z` → 推送标签。`v*` 标签会触发发布工作流。
 
-- `.github/workflows/main.yml` — Windows runner; NSIS installer + portable zip; MSI built `continue-on-error` because WiX `light.exe` is often blocked by Defender on runners. Main release path.
-- `.cnb.yml` (CNB, Linux container) + `.workflow/打包.yml` — Linux can't produce NSIS, so it cross-compiles the exe with `--target x86_64-pc-windows-gnu --no-bundle` and **must copy `WebView2Loader.dll`** (searched from the cargo registry or `target/`, x64 only) next to the exe before `package-portable.mjs`. Don't "simplify" that step away.
-- `bundle.targets` in `tauri.conf.json` stays `["nsis"]`; MSI is only produced by overriding with `--bundles msi` on the CLI.
+## 提交信息
 
-## Architecture notes
+- 格式：`vX.Y.Z <类型>: <中文描述>`，例如 `v0.1.1 docs: 将 AGENTS.md 中文化并补充提交信息规范`。
+- 版本号 = 最新的 `v*` 标签加一；提交前用 `git describe --tags --abbrev=0` 查最新标签。
+- `<类型>` 用 `feat` / `fix` / `docs` / `chore` 等常见类别，描述一律中文。
 
-- **Single source of truth is Rust's SQLite.** Every UI edit goes `invoke` command → SQLite commit → Rust broadcasts the full config via `emit("config-changed")` → every window re-renders. Don't cache/mutate config locally in the frontend beyond optimistic state; a change not written through a command will be lost on next broadcast.
-- **Window routing by label** in `src/App.tsx`: label `main` → main shell; label `overlay-{id}` → `OverlayWindow`. New overlay windows are created from Rust (`overlay_win.rs`) with that label scheme; capabilities (`src-tauri/capabilities/default.json`) grant permissions to `["main", "overlay-*"]` — new Tauri APIs need a permission entry here or they fail at runtime.
-- **State registration order matters**: `app.manage(store)` must happen before any window is created, or the overlay's first `get_config` call errors with "state not managed". See `src-tauri/src/lib.rs`.
-- Data dir: installed → `%APPDATA%/com.izuna.toolbox/`; portable (a `portable.flag` file next to the exe) → `data/` beside the exe. `PORTABLE_FLAG` lives in `lib.rs`.
-- Auto-update is Windows-only (`cfg(windows)` gate on `reqwest`/`tokio` deps in `Cargo.toml`); the download runs on the Rust side because release-asset CDN redirects block cross-origin reads from the webview.
-- Initial/seed data (default overlay, variables, computed vars) is defined at the top of `src-tauri/src/store.rs` (`SEED_VARIABLES` / `SEED_COMPUTED`) — used for both first-run and re-seeding an emptied overlay.
+## 发布流水线（两套，对应不同托管环境）
 
-## Size-conscious build profile
+- `.github/workflows/main.yml` —— Windows runner；NSIS 安装包 + portable zip；MSI 以 `continue-on-error` 构建，因为 runner 上 Defender 常拦截 WiX `light.exe`。主发布路径。
+- `.cnb.yml`（CNB，Linux 容器）+ `.workflow/打包.yml` —— Linux 无法产 NSIS，所以用 `--target x86_64-pc-windows-gnu --no-bundle` 交叉编译 exe，并且在 `package-portable.mjs` 之前**必须把 `WebView2Loader.dll`**（从 cargo registry 或 `target/` 中找，仅 x64）拷到 exe 同目录。不要“简化”掉这一步。
+- `tauri.conf.json` 的 `bundle.targets` 保持 `["nsis"]`；MSI 只在命令行用 `--bundles msi` 覆盖时产出。
 
-The project deliberately minimizes binary size: `rusqlite` bundled, `webviewInstallMode: skip`, release profile `lto + strip + opt-level "s" + panic abort`. Avoid adding heavyweight deps or re-enabling the WebView2 bootstrapper unless the user asks.
+## 架构要点
 
-## Reference
+- **唯一真相是 Rust 的 SQLite。** 前端每次编辑都走 `invoke` 命令 → SQLite 提交 → Rust 通过 `emit("config-changed")` 广播完整配置 → 各窗口重新渲染。不要在前端缓存/本地改配置（乐观状态除外）；没走命令写入的改动会在下次广播时丢失。
+- **窗口按 label 路由**，见 `src/App.tsx`：label `main` → 主界面；label `overlay-{id}` → `OverlayWindow`。新浮窗由 Rust（`overlay_win.rs`）按这个 label 规则创建；权限（`src-tauri/capabilities/default.json`）授权给 `["main", "overlay-*"]`——新增 Tauri API 必须补权限项，否则运行时失败。
+- **状态注册顺序很重要**：`app.manage(store)` 必须在任何窗口创建之前，否则浮窗首次 `get_config` 会报 "state not managed"。见 `src-tauri/src/lib.rs`。
+- 数据目录：安装版 → `%APPDATA%/com.izuna.toolbox/`；便携版（exe 同目录存在 `portable.flag`）→ exe 同目录 `data/`。`PORTABLE_FLAG` 定义在 `lib.rs`。
+- 自动更新仅 Windows（`Cargo.toml` 里 `reqwest`/`tokio` 用 `cfg(windows)` 控制）；下载放在 Rust 侧，因为发布资产的 CDN 重定向会阻止 webview 跨域读取。
+- 初始/种子数据（默认浮窗、变量、计算变量）定义在 `src-tauri/src/store.rs` 顶部（`SEED_VARIABLES` / `SEED_COMPUTED`）——首次运行和清空浮窗后重建都会用到。
 
-`README.md` (Chinese) documents the feature set, data model, and update flow in detail and is kept current — consult it before guessing at behavior.
+## 严格控制体积的构建配置
+
+项目刻意压缩二进制体积：`rusqlite` bundled、`webviewInstallMode: skip`、release profile `lto + strip + opt-level "s" + panic abort`。除非用户明确要求，不要加大依赖或重新启用 WebView2 引导安装器。
+
+## 参考
+
+`README.md`（中文）详细记录功能、数据模型和更新流程，并保持更新——遇到行为疑问先查它，别猜。
