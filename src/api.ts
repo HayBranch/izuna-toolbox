@@ -59,6 +59,10 @@ export const updateOverlay = (overlay: OverlayConfig) =>
 export const moveOverlay = (id: number, x: number, y: number) =>
   cfged(invoke<AppConfig>("move_overlay", { id, x, y }));
 
+/** 拖到屏幕外时，把浮窗移回当前显示器中央 */
+export const resetOverlayPosition = (id: number) =>
+  cfged(invoke<AppConfig>("reset_overlay_position", { id }));
+
 export const setOverlayShown = (id: number, value: boolean) =>
   cfged(invoke<AppConfig>("set_overlay_shown", { id, value }));
 
@@ -133,6 +137,10 @@ export const setQueueClickThrough = (id: number, value: boolean) =>
 
 export const moveQueue = (id: number, x: number, y: number) =>
   cfged(invoke<AppConfig>("move_queue", { id, x, y }));
+
+/** 拖到屏幕外时，把排队弹窗移回当前显示器中央 */
+export const resetQueuePosition = (id: number) =>
+  cfged(invoke<AppConfig>("reset_queue_position", { id }));
 
 export const deleteQueue = (id: number) =>
   cfged(invoke<AppConfig>("delete_queue", { id }));

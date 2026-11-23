@@ -32,6 +32,29 @@ fn changed(app: &AppHandle, store: &Store) -> Result<Config, String> {
     Ok(config)
 }
 
+/// 把弹窗移回当前显示器的可见中央；拿不到显示器信息时退回主屏 1920×1080 估算。
+fn centered_position(window: &WebviewWindow) -> (i32, i32) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let (mx, my, mw, mh) = match monitor {
+        Some(m) => (
+            m.position().x,
+            m.position().y,
+            m.size().width as i32,
+            m.size().height as i32,
+        ),
+        None => (0, 0, 1920, 1080),
+    };
+    let (w, h) = window
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or((320, 120));
+    (mx + (mw - w).max(0) / 2, my + (mh - h).max(0) / 2)
+}
+
 /// 浮窗 / 排队弹窗无权做新建删除、编辑名单这类"全局"操作。
 fn require_main(window: &WebviewWindow) -> Result<(), String> {
     if id_from_label(window.label()).is_some()
@@ -130,6 +153,25 @@ pub fn move_overlay(
     check_permission(&window, id)?;
     store.move_overlay(id, x, y)?;
     // 必须应用位置（true）——这里曾经误用 false，X/Y 输入框点了不生效
+    sync_and_changed(&app, &store, id, true)
+}
+
+/// 重置浮窗位置：拖到屏幕外点不到的情况下，一键移回当前显示器中央。
+#[tauri::command(async)]
+pub fn reset_overlay_position(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_permission(&window, id)?;
+    // 用目标浮窗自己所在的显示器和尺寸居中；主窗口调用时不能拿主窗口的尺寸算。
+    let (x, y) = app
+        .get_webview_window(&overlay_win::overlay_label(id))
+        .map(|w| centered_position(&w))
+        .unwrap_or_else(|| centered_position(&window));
+    store.move_overlay(id, x, y)?;
+    log::info!("浮窗 #{id} 位置重置为 ({x}, {y})");
     sync_and_changed(&app, &store, id, true)
 }
 
@@ -519,6 +561,25 @@ pub fn move_queue(
 ) -> Result<Config, String> {
     check_queue_permission(&window, id)?;
     store.move_queue(id, x, y)?;
+    sync_queue_and_changed(&app, &store, id, true)
+}
+
+/// 重置排队弹窗位置：一键移回当前显示器中央。
+#[tauri::command(async)]
+pub fn reset_queue_position(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_queue_permission(&window, id)?;
+    // 同上：按目标弹窗自己的显示器和尺寸居中。
+    let (x, y) = app
+        .get_webview_window(&queue_win::queue_label(id))
+        .map(|w| centered_position(&w))
+        .unwrap_or_else(|| centered_position(&window));
+    store.move_queue(id, x, y)?;
+    log::info!("排队弹窗 #{id} 位置重置为 ({x}, {y})");
     sync_queue_and_changed(&app, &store, id, true)
 }
 

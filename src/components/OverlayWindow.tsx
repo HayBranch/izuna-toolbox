@@ -8,7 +8,7 @@
  *    - 手动：直接在浮窗边缘/角落拖动（startResizeDragging）改宽高，拖完写回配置。
  *      手动模式字幕撑满窗口（宽度决定折行），不再按内容反向改窗口。
  * 3. 每 30s 刷新一次时间类变量（{today} 跨天也能自动更新）；
- * 4. 未开鼠标穿透时，悬停显示小工具条：关于（悬浮看基本信息）/ 置顶 / 锁定穿透 / 隐藏，
+ * 4. 未开鼠标穿透时，悬停显示小工具条：关于 / 重置位置 / 恢复自动尺寸 / 置顶 / 锁定穿透 / 隐藏，
  *    穿透开启后浮窗收不到鼠标事件，只能回主窗口解锁（主窗口始终可以控制）。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +16,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import {
   getConfig,
+  resetOverlayPosition,
   resizeOverlay,
   setOverlayAlwaysTop,
   setOverlayClickThrough,
@@ -197,6 +198,13 @@ export default function OverlayWindow() {
         <div className="absolute right-1 top-1 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
           <PopupToolButton title={info} ariaLabel="关于这套浮窗">
             ℹ️
+          </PopupToolButton>
+          <PopupToolButton
+            title="重置位置（移回当前屏幕中央，拖出屏幕后可用）"
+            ariaLabel="重置浮窗位置"
+            onClick={() => resetOverlayPosition(id).catch(console.warn)}
+          >
+            🎯
           </PopupToolButton>
           {manual && (
             <PopupToolButton

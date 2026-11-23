@@ -26,6 +26,7 @@ import {
   deleteOverlay,
   deleteVariable,
   moveOverlay,
+  resetOverlayPosition,
   resizeOverlay,
   setOverlayAlwaysTop,
   setOverlayClickThrough,
@@ -590,6 +591,14 @@ function OverlayEditor({
               onChange={(v) => run(moveOverlay(overlay.id, v, overlay.y))} />
             <NumberField label="位置 Y" value={overlay.y} min={-9999} max={9999} wide
               onChange={(v) => run(moveOverlay(overlay.id, overlay.x, v))} />
+            <button
+              type="button"
+              onClick={() => run(resetOverlayPosition(overlay.id))}
+              title="把浮窗移回当前屏幕中央（拖出屏幕后可在这里找回）"
+              className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+            >
+              重置位置
+            </button>
             <span className="text-xs text-slate-400 dark:text-slate-500">拖动浮窗自动保存</span>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">

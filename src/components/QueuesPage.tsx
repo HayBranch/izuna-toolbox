@@ -15,6 +15,7 @@ import {
   deleteQueueEntry,
   getQueueStatus,
   moveQueue,
+  resetQueuePosition,
   renameQueueEntry,
   resizeQueue,
   setQueueAlwaysTop,
@@ -598,6 +599,14 @@ function QueueEditor({
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <NumberField label="位置 X" value={queue.x} min={-20_000} max={20_000} integer wide onChange={(v) => void run(moveQueue(queue.id, v, queue.y))} />
           <NumberField label="位置 Y" value={queue.y} min={-20_000} max={20_000} integer wide onChange={(v) => void run(moveQueue(queue.id, queue.x, v))} />
+          <button
+            type="button"
+            onClick={() => void run(resetQueuePosition(queue.id))}
+            title="把排队弹窗移回当前屏幕中央（拖出屏幕后可在这里找回）"
+            className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+          >
+            重置位置
+          </button>
           <button
             type="button"
             onClick={() => void run(setQueueShown(queue.id, true))}

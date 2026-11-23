@@ -5,13 +5,14 @@
  * 1. 监听 config-changed + 启动时 get_config，按自己的 id 渲染队列；
  * 2. 自动尺寸：ResizeObserver 量内容 → set_queue_size 让窗口贴合内容；
  *    手动尺寸：拖动边缘改宽高（startResizeDragging），拖完写回配置；
- * 3. 未锁定鼠标穿透时悬停显示工具条：信息 / 恢复自动尺寸 / 置顶 / 穿透 / 隐藏。
+ * 3. 未锁定鼠标穿透时悬停显示工具条：信息 / 重置位置 / 恢复自动尺寸 / 置顶 / 穿透 / 隐藏。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getConfig,
+  resetQueuePosition,
   resizeQueue,
   setQueueAlwaysTop,
   setQueueClickThrough,
@@ -166,6 +167,13 @@ export default function QueueWindow() {
         <div className="absolute right-1 top-1 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
           <PopupToolButton title={info} ariaLabel="关于这个排队弹窗">
             ℹ️
+          </PopupToolButton>
+          <PopupToolButton
+            title="重置位置（移回当前屏幕中央，拖出屏幕后可用）"
+            ariaLabel="重置排队弹窗位置"
+            onClick={() => resetQueuePosition(id).catch(console.warn)}
+          >
+            🎯
           </PopupToolButton>
           {manual && (
             <PopupToolButton
