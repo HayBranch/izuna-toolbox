@@ -47,7 +47,7 @@ npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；
 - **唯一真相是 Rust 的 SQLite。** 前端每次编辑都走 `invoke` 命令 → SQLite 提交 → Rust 通过 `emit("config-changed")` 广播完整配置 → 各窗口重新渲染。不要在前端缓存/本地改配置（乐观状态除外）；没走命令写入的改动会在下次广播时丢失。
 - **窗口按 label 路由**，见 `src/App.tsx`：label `main` → 主界面；label `overlay-{id}` → `OverlayWindow`。新浮窗由 Rust（`overlay_win.rs`）按这个 label 规则创建；权限（`src-tauri/capabilities/default.json`）授权给 `["main", "overlay-*"]`——新增 Tauri API 必须补权限项，否则运行时失败。
 - **状态注册顺序很重要**：`app.manage(store)` 必须在任何窗口创建之前，否则浮窗首次 `get_config` 会报 "state not managed"。见 `src-tauri/src/lib.rs`。
-- 数据目录：安装版 → `%APPDATA%/com.izuna.toolbox/`；便携版（exe 同目录存在 `portable.flag`）→ exe 同目录 `data/`。`PORTABLE_FLAG` 定义在 `lib.rs`。
+- 启动配置：`exe 同目录/conf/conf.toml` 决定 `portable`（数据库：`true` → exe 同目录 `data/`，`false` → `%APPDATA%/com.izuna.toolbox/`）和 `log_level`。日志固定写 exe 同目录 `logs/`；旧 `portable.flag` 只在首次生成配置时作为默认值参考。
 - 自动更新仅 Windows（`Cargo.toml` 里 `reqwest`/`tokio` 用 `cfg(windows)` 控制）；下载放在 Rust 侧，因为发布资产的 CDN 重定向会阻止 webview 跨域读取。
 - 初始/种子数据（默认浮窗、变量、计算变量）定义在 `src-tauri/src/store.rs` 顶部（`SEED_VARIABLES` / `SEED_COMPUTED`）——首次运行和清空浮窗后重建都会用到。
 

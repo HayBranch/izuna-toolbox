@@ -4,9 +4,10 @@
  * 1. 读取 `tauri build --no-bundle` 产出的 release exe；
  * 2. 组装 `dist-portable/Izuna-Toolbox-<版本>/`：
  *    - `Izuna Toolbox.exe` 主程序
- *    - `portable.flag`    便携模式标记（Rust 侧据此把数据写到 exe 同目录的 data/）
+ *    - `conf/conf.toml`   启动配置（便携模式 + 日志等级）
  *    - `WebView2Loader.dll` 仅 windows-gnu 交叉编译产物需要（见下方说明）
  *    - `data/`            SQLite 数据库目录（首次运行自动建库）
+ *    - `logs/`            日志目录（运行时自动写入）
  *    - `README.txt`       使用说明
  * 3. 用系统自带能力压缩成 `dist-portable/Izuna-Toolbox-<版本>-portable-x64.zip`。
  *
@@ -49,6 +50,7 @@ const zipPath = path.join(outRoot, `${appDirName}-portable-x64.zip`);
 rmSync(appDir, { recursive: true, force: true });
 rmSync(zipPath, { force: true });
 mkdirSync(path.join(appDir, "data"), { recursive: true });
+mkdirSync(path.join(appDir, "logs"), { recursive: true });
 
 copyFileSync(exePath, path.join(appDir, "Izuna Toolbox.exe"));
 
@@ -87,13 +89,17 @@ if (needsLoader) {
   console.log(`附带 WebView2Loader.dll：${loaderDll}`);
 }
 
-// 便携模式标记：只要它和 exe 同目录，程序就把数据库放到同目录的 data/ 下。
+// 便携包默认通过 conf/conf.toml 开启便携模式；启动后一律以该配置为准。
+mkdirSync(path.join(appDir, "conf"), { recursive: true });
 writeFileSync(
-  path.join(appDir, "portable.flag"),
+  path.join(appDir, "conf", "conf.toml"),
   [
-    "Izuna Toolbox portable mode marker.",
-    "Keep this file next to the executable to store data in .\\data.",
-    "Delete it to fall back to %APPDATA%\\com.izuna.toolbox.",
+    "# 泉奈工具箱配置（exe 同目录 conf/conf.toml）",
+    "# 是否便携包：true = 数据库放在 exe 同目录 data/；false = 系统应用数据目录",
+    "portable = true",
+    "",
+    "# 日志等级：off / error / warn / info / debug / trace",
+    'log_level = "info"',
     "",
   ].join("\r\n"),
   "utf8",
@@ -108,13 +114,14 @@ writeFileSync(
     "1. 双击「Izuna Toolbox.exe」运行。",
     "   需要 Windows 10/11 自带的 WebView2 运行时（系统一般已包含）。",
     "",
-    "2. 所有数据都保存在本文件夹的 data\\izuna-toolbox.db，",
-    "   删除它即可恢复出厂；整个文件夹可以随意拷贝/移动到 U 盘或其它电脑。",
+    "2. 数据库在本文件夹的 data\\izuna-toolbox.db，删除它即可恢复出厂；",
+    "   日志固定写在本文件夹的 logs\\，整个文件夹可随意拷贝/移动。",
     "",
-    "3. 请不要删除 portable.flag：它是便携模式标记。",
-    "   删除后程序会改用系统目录 %APPDATA%\\com.izuna.toolbox 保存数据。",
+    "3. 便携模式由 conf\\conf.toml 的 portable 控制（本包默认 true）：",
+    "   true 用本文件夹 data\\；改成 false 则用 %APPDATA%\\com.izuna.toolbox。",
+    "   同文件还能改 log_level（off/error/warn/info/debug/trace）。",
     "",
-    "4. 安装版（NSIS 安装包）不受影响，仍然使用系统 %APPDATA% 目录。",
+    "4. 安装版（NSIS 安装包）首次运行会生成 conf\\conf.toml，默认 portable = false。",
     "",
     ...(needsLoader
       ? [

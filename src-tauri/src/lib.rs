@@ -10,6 +10,7 @@
 //! → 各浮窗页面按自己的 label 渲染内容；拖动浮窗 → `Moved` 事件回写位置。
 //! B 站弹幕由 `danmaku` 模块的长连接任务实时接收，按队列配置的间隔批量写入。
 
+mod app_config;
 mod commands;
 mod danmaku;
 mod overlay_win;
@@ -25,28 +26,24 @@ use serde::Serialize;
 use store::Store;
 use tauri::Manager;
 
-/// 便携模式标记文件名：放在 exe 同目录即可启用便携数据目录。
-const PORTABLE_FLAG: &str = "portable.flag";
-/// 便携模式的数据文件夹名（与 exe 同目录）。
-const PORTABLE_DATA_DIR: &str = "data";
-
-/// 解析持久化数据目录：
-/// - 便携版（exe 同目录存在 `portable.flag`）：使用 exe 同目录的 `data/`，
-///   整个文件夹可随程序一起拷贝走；
-/// - 安装版（NSIS 安装后没有该标记）：保持原样，使用系统应用数据目录
-///   `%APPDATA%/com.izuna.toolbox/`。
-fn portable_data_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    if dir.join(PORTABLE_FLAG).is_file() {
-        Some(dir.join(PORTABLE_DATA_DIR))
-    } else {
-        None
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 启动配置：exe 同目录 conf/conf.toml（便携模式 + 日志等级）。
+    // 任何读取异常都降级为默认值，提示先攒着，等 logger 注册后再写进日志。
+    let exe_result = std::env::current_exe();
+    let exe_dir = exe_result
+        .as_ref()
+        .ok()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut loaded = app_config::load(&exe_dir);
+    if exe_result.is_err() {
+        loaded.warnings.push(
+            "无法确定 exe 所在目录，配置与日志暂时按当前工作目录处理".into(),
+        );
+    }
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
@@ -64,18 +61,17 @@ pub fn run() {
             }
         }));
     }
-    // 日志插件：dev 终端 + WebView 控制台 + 日志文件三路输出，带级别过滤。
-    // 必须在 setup 前注册：插件在 setup 阶段注册全局 log logger，
-    // 业务代码必须用 log::{info,warn,error}!（tracing! 宏没有 subscriber 会被丢弃）。
+    // 日志插件：dev 终端 + WebView 控制台 + exe 同目录 logs/ 三路输出。
+    // 等级来自 conf/conf.toml；必须在 setup 前注册，插件会在 setup 阶段
+    // 注册全局 log logger，业务代码一律用 log::{info,warn,error}!。
     builder = builder.plugin(
         tauri_plugin_log::Builder::new()
-            .level(log::LevelFilter::Info)
-            // 显式声明三路目标：终端 stdout / WebView 控制台 / 日志文件。
-            // WebView 目标默认不启用，不加的话前端 console 不会进日志。
+            .level(loaded.log_level)
             .targets([
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                    path: exe_dir.join(app_config::LOGS_DIR),
                     file_name: None,
                 }),
             ])
@@ -83,16 +79,25 @@ pub fn run() {
     );
 
     builder
-        .setup(|app| {
-            // 1. 数据存储：SQLite 数据库放在应用数据目录
-            //    - 安装版：Windows 的 %APPDATA%/com.izuna.toolbox/
-            //    - 便携版：exe 同目录的 data/（由同目录的 portable.flag 标记）
-            //    首次运行建表并种入示例数据。
-            let data_dir = match portable_data_dir() {
-                Some(dir) => dir,
-                None => app.path().app_data_dir()?,
+        .setup(move |app| {
+            // logger 已就绪，补记启动配置阶段的提示。
+            for warning in &loaded.warnings {
+                log::warn!("{warning}");
+            }
+
+            // 1. 数据存储仍是 SQLite；便携模式由 conf/conf.toml 决定：
+            //    true  → exe 同目录 data/（整包可拷走）
+            //    false → 系统应用数据目录 %APPDATA%/com.izuna.toolbox/
+            let data_dir = if loaded.portable {
+                exe_dir.join(app_config::DATA_DIR)
+            } else {
+                app.path().app_data_dir()?
             };
             std::fs::create_dir_all(&data_dir)?;
+
+            log::info!("配置文件：{}", loaded.path.display());
+            log::info!("数据库目录：{}", data_dir.display());
+            log::info!("日志目录：{}", exe_dir.join(app_config::LOGS_DIR).display());
 
             let store = Arc::new(Store::new(data_dir.join("izuna-toolbox.db"))?);
 

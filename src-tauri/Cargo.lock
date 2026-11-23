@@ -1984,6 +1984,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tokio-tungstenite",
+ "toml 0.8.2",
 ]
 
 [[package]]

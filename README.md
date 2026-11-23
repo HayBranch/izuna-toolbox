@@ -105,10 +105,12 @@
 
 ### 💾 SQLite 持久化
 
-- **安装版**（NSIS 安装包）：数据保存在 `%APPDATA%/com.izuna.toolbox/izuna-toolbox.db`
-  （SQLite，`rusqlite` bundled 静态编译，无需安装任何东西）；
-- **便携版**：exe 同目录存在 `portable.flag` 时，数据保存在同目录的 `data/izuna-toolbox.db`，
-  整个文件夹可以拷到 U 盘或别的电脑，数据跟着走；
+- 数据库统一用 SQLite（`rusqlite` bundled 静态编译，无需额外安装），文件名固定 `izuna-toolbox.db`；
+- 存放位置由 exe 同目录的 `conf/conf.toml` 中的 `portable` 决定：
+  - `portable = false`（安装版默认）→ `%APPDATA%/com.izuna.toolbox/izuna-toolbox.db`
+  - `portable = true`（便携版默认）→ exe 同目录 `data/izuna-toolbox.db`，整包可拷走
+- 首次运行会自动生成该配置文件；旧便携包如果只有 `portable.flag`，会据此把首次生成的
+  `portable` 设为 `true`，之后一律以配置文件为准；
 - 表结构：`overlays`（浮窗队列，含每套自己的账号、创建时间与最后修改时间）、
   `variables` / `computed`（套内变量，按 `overlay_id` 归属）、
   `queues`（排队队列：直播间、正则、排序、弹窗样式）与
@@ -117,6 +119,13 @@
   顶部的 `SEED_VARIABLES` / `SEED_COMPUTED` 里配置：空库第一次启动带示范数值，
   之后新建浮窗或变量被删光后的补种都用同一套定义、数值从 0 开始；
 - 每次变更即提交，退出无需保存；删除数据库文件即恢复出厂。
+
+### 📝 日志
+
+- 日志文件固定写在 exe 同目录的 `logs/`，与数据库放哪无关；
+- 日志等级由 `conf/conf.toml` 的 `log_level` 控制，可选 `off` / `error` / `warn` /
+  `info` / `debug` / `trace`，默认 `info`，重启后生效；
+- 同时输出到开发终端与 WebView 控制台（DevTools 里可看），文件按大小自动轮转。
 
 ## 更新日志
 
@@ -129,6 +138,10 @@
 - 主窗口改为「悬浮字幕 / 排队队列」两页导航；
 - 新增依赖：`regex`（正则校验）、Windows 下 `tokio-tungstenite` / `futures-util` /
   `flate2`（弹幕 WebSocket 与 zlib 解包）；Linux 原生构建不编译网络栈，保持 CNB 交叉编译可用。
+- **日志系统**：同时输出到终端、WebView 控制台和 exe 同目录 `logs/`，等级由 `conf/conf.toml`
+  的 `log_level` 控制；
+- **启动配置**：新增 exe 同目录 `conf/conf.toml`，`portable` 决定 SQLite 放在 `data/`
+  还是系统应用数据目录；旧 `portable.flag` 只在首次生成配置时用于推断默认值。
 - **修复更新后不自动重启**：v0.1.0 的看门进程只等「旧进程退出 + 新 exe 能打开」就启动，
   但安装器此刻可能仍在写入，看门进程会抢先启动、和安装器抢单实例锁或拿到写到一半的文件，
   导致装完不自动重启。现改为等 exe 能独占打开**且**写入时间连续两次轮询（间隔 2s）不再变化
@@ -213,8 +226,8 @@ npm run bundle:portable  # 打包：便携版目录 + zip（dist-portable/）
 | 便携版目录 | `dist-portable/Izuna-Toolbox-<版本>/` |
 | 便携版 zip | `dist-portable/Izuna-Toolbox-<版本>-portable-x64.zip` |
 
-便携版解压后双击 `Izuna Toolbox.exe` 即可运行，数据写在同目录的 `data/`；
-`portable.flag` 是便携模式标记，删掉它就回到安装版的 `%APPDATA%` 存储方式。
+便携版解压后双击 `Izuna Toolbox.exe` 即可运行。包内已带 `conf/conf.toml`（`portable = true`），
+数据在同目录 `data/`，日志在同目录 `logs/`；把 `portable` 改成 `false` 即改用 `%APPDATA%` 存储。
 GitHub Actions 打 tag（`v*`）时会把 NSIS 安装包和便携版 zip 一起传到 Release，
 MSI 若构建成功也会一并上传；手动触发 workflow 时同样可以在 Actions Artifact 里下载。
 

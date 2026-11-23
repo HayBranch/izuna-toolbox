@@ -26,6 +26,8 @@ tauri-plugin-single-instance = "2"
 # 日志系统：tauri-plugin-log 注册全局 log logger，终端 + WebView 控制台 + 日志文件三路输出
 tauri-plugin-log = "2"
 log = "0.4"
+# 启动配置 conf/conf.toml（便携模式 + 日志等级）
+toml = "0.8"
 # 排队队列的正则校验（纯 Rust，无 C 依赖）
 regex = "1"
 serde_json = "1"
