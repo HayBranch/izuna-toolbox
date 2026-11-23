@@ -4,7 +4,7 @@ use tauri::{
     AppHandle, Manager,
 };
 
-use crate::overlay_win;
+use crate::{overlay_win, queue_win};
 
 /// 创建系统托盘：左键点击切换主窗口显隐，右键弹出菜单。
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -43,6 +43,7 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
         overlay_win::sync_all_overlay_windows(app);
+        queue_win::sync_all_queue_windows(app);
     }
 }
 
@@ -54,6 +55,7 @@ fn toggle_main_window(app: &AppHandle) {
             if visible && focused {
                 let _ = window.hide();
                 overlay_win::sync_all_overlay_windows(window.app_handle());
+                queue_win::sync_all_queue_windows(window.app_handle());
             } else {
                 show_main_window(app);
             }

@@ -75,12 +75,74 @@ export interface OverlayConfig {
   computed: ComputedVar[];
 }
 
-/** 全量配置（Rust 侧 SQLite）：浮窗（套）列表 */
-export interface AppConfig {
-  overlays: OverlayConfig[];
+/** 排队队列里的一个成员：同一 uid 累计发送次数 */
+export interface QueueEntry {
+  id: number;
+  /** B 站 uid；0 表示主窗口手动添加 */
+  uid: number;
+  nickname: string;
+  /** 匹配到的弹幕条数 */
+  count: number;
+  /** 首次排队时间（毫秒时间戳） */
+  firstAt: number;
+  /** 最近一次排队时间（毫秒时间戳） */
+  lastAt: number;
 }
 
-/** 拖动浮窗时 Rust 发出的 overlay-moved 事件负载 */
+/** 一个排队队列：独立的直播间、正则、排序与弹窗样式 */
+export interface QueueConfig {
+  id: number;
+  name: string;
+  /** 直播间号（支持短号；0 = 未设置） */
+  roomId: number;
+  /** 弹幕批量写入 / 界面刷新间隔（秒） */
+  pollSecs: number;
+  /** 匹配弹幕文本的正则（任一命中即计数） */
+  patterns: string[];
+  /** time 按首次发送时间 | count 按发送次数 */
+  sortMode: "time" | "count";
+  /** 是否监听弹幕 */
+  enabled: boolean;
+  /** 弹窗最多显示多少人 */
+  maxEntries: number;
+  shown: boolean;
+  alwaysOnTop: boolean;
+  clickThrough: boolean;
+  x: number;
+  y: number;
+  fontSize: number;
+  fontColor: string;
+  bold: boolean;
+  shadow: boolean;
+  bgColor: string;
+  bgOpacity: number;
+  /** 自动宽度最大宽度（逻辑像素） */
+  maxWidth: number;
+  /** 手动尺寸（0 = 自动按内容） */
+  width: number;
+  height: number;
+  createdAt: number;
+  updatedAt: number;
+  entries: QueueEntry[];
+}
+
+/** 弹幕连接状态（Rust 内存，不落库） */
+export interface QueueStatus {
+  queueId: number;
+  connected: boolean;
+  realRoomId: number;
+  lastMessageAt: number;
+  lastError: string;
+  updatedAt: number;
+}
+
+/** 全量配置（Rust 侧 SQLite）：浮窗（套）列表 + 排队队列列表 */
+export interface AppConfig {
+  overlays: OverlayConfig[];
+  queues: QueueConfig[];
+}
+
+/** 拖动浮窗 / 排队弹窗时 Rust 发出的事件负载 */
 export interface MovedEvent {
   id: number;
   x: number;

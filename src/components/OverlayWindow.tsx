@@ -26,18 +26,8 @@ import {
 import type { AppConfig } from "../types";
 import { formatDateTime } from "../utils";
 import { computeVars } from "../vars";
+import { PopupResizeHandles, PopupToolButton, type ResizeDir } from "./popup";
 import SubtitleView from "./SubtitleView";
-
-/** 对齐 Tauri 的 ResizeDirection（该类型未导出，这里手写同形） */
-type ResizeDir =
-  | "East"
-  | "North"
-  | "NorthEast"
-  | "NorthWest"
-  | "South"
-  | "SouthEast"
-  | "SouthWest"
-  | "West";
 
 function parseId(): number {
   const label = getCurrentWindow().label; // overlay-{id}
@@ -200,88 +190,42 @@ export default function OverlayWindow() {
       />
 
       {interactive && (
-        <>
-          {/* 四边 + 四角拖拽把手：透明热区盖在窗口边缘，按下即进入系统 resize 拖拽 */}
-          {RESIZE_HANDLES.map((h) => (
-            <div
-              key={h.dir}
-              onMouseDown={(e) => void beginResize(e, h.dir)}
-              className={`absolute z-10 opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-100 ${h.bg} ${h.className}`}
-            />
-          ))}
-        </>
+        <PopupResizeHandles onStart={(e, dir) => void beginResize(e, dir)} />
       )}
 
       {interactive && (
         <div className="absolute right-1 top-1 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <OverlayToolButton title={info} ariaLabel="关于这套浮窗">
+          <PopupToolButton title={info} ariaLabel="关于这套浮窗">
             ℹ️
-          </OverlayToolButton>
+          </PopupToolButton>
           {manual && (
-            <OverlayToolButton
+            <PopupToolButton
               title="恢复自动尺寸（按内容自适应）"
               onClick={() => resizeOverlay(id, 0, 0).catch(console.warn)}
             >
               ⤡
-            </OverlayToolButton>
+            </PopupToolButton>
           )}
-          <OverlayToolButton
+          <PopupToolButton
             title={cfg.alwaysOnTop ? "点击取消置顶" : "点击置顶"}
             onClick={() => setOverlayAlwaysTop(id, !cfg.alwaysOnTop).catch(console.warn)}
           >
             {cfg.alwaysOnTop ? "📌" : "📍"}
-          </OverlayToolButton>
-          <OverlayToolButton
+          </PopupToolButton>
+          <PopupToolButton
             title="锁定：鼠标穿透（之后请回主窗口解锁）"
             onClick={() => setOverlayClickThrough(id, true).catch(console.warn)}
           >
             🔒
-          </OverlayToolButton>
-          <OverlayToolButton
+          </PopupToolButton>
+          <PopupToolButton
             title="隐藏浮窗"
             onClick={() => setOverlayShown(id, false).catch(console.warn)}
           >
             ✕
-          </OverlayToolButton>
+          </PopupToolButton>
         </div>
       )}
     </div>
-  );
-}
-
-/** 拖拽把手热区：每条只有几个逻辑像素宽/高，悬停时显示一条细线提示可拖 */
-const RESIZE_HANDLES: Array<{ dir: ResizeDir; className: string; bg: string }> = [
-  // 四角（优先级最高，放后面覆盖边）
-  { dir: "NorthWest", bg: "hover:bg-indigo-400/50", className: "left-0 top-0 h-2.5 w-2.5 cursor-nwse-resize" },
-  { dir: "NorthEast", bg: "hover:bg-indigo-400/50", className: "right-0 top-0 h-2.5 w-2.5 cursor-nesw-resize" },
-  { dir: "SouthWest", bg: "hover:bg-indigo-400/50", className: "bottom-0 left-0 h-2.5 w-2.5 cursor-nesw-resize" },
-  { dir: "SouthEast", bg: "hover:bg-indigo-400/50", className: "bottom-0 right-0 h-2.5 w-2.5 cursor-nwse-resize" },
-  // 四边
-  { dir: "North", bg: "hover:bg-indigo-400/40", className: "left-2.5 right-2.5 top-0 h-1.5 cursor-ns-resize" },
-  { dir: "South", bg: "hover:bg-indigo-400/40", className: "bottom-0 left-2.5 right-2.5 h-1.5 cursor-ns-resize" },
-  { dir: "West", bg: "hover:bg-indigo-400/40", className: "bottom-2.5 left-0 top-2.5 w-1.5 cursor-ew-resize" },
-  { dir: "East", bg: "hover:bg-indigo-400/40", className: "bottom-2.5 right-0 top-2.5 w-1.5 cursor-ew-resize" },
-];
-
-function OverlayToolButton({
-  title,
-  ariaLabel,
-  onClick,
-  children,
-}: {
-  title: string;
-  ariaLabel?: string;
-  onClick?: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      title={title}
-      aria-label={ariaLabel}
-      onClick={onClick}
-      className="flex h-6 w-6 items-center justify-center rounded-full border border-slate-500/60 bg-slate-900/85 text-[11px] leading-none text-slate-300 shadow transition hover:border-cyan-400 hover:text-white"
-    >
-      {children}
-    </button>
   );
 }

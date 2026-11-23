@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
+use crate::danmaku::{self, DanmakuManager, QueueStatus};
 use crate::overlay_win::{self, id_from_label};
-use crate::store::{ComputedVar, Config, OverlayConfig, Store, UserVar};
+use crate::queue_win;
+use crate::store::{ComputedVar, Config, OverlayConfig, QueueConfig, Store, UserVar};
 
 /// 全量配置变化事件名（Rust → 所有窗口广播）。
 pub const CONFIG_CHANGED_EVENT: &str = "config-changed";
@@ -30,10 +32,12 @@ fn changed(app: &AppHandle, store: &Store) -> Result<Config, String> {
     Ok(config)
 }
 
-/// 浮窗页面无权做新建/删除这类"全局"操作。
+/// 浮窗 / 排队弹窗无权做新建删除、编辑名单这类"全局"操作。
 fn require_main(window: &WebviewWindow) -> Result<(), String> {
-    if id_from_label(window.label()).is_some() {
-        return Err("浮窗无权执行该操作，请在主窗口操作".into());
+    if id_from_label(window.label()).is_some()
+        || queue_win::id_from_label(window.label()).is_some()
+    {
+        return Err("弹窗无权执行该操作，请在主窗口操作".into());
     }
     Ok(())
 }
@@ -43,6 +47,19 @@ fn check_permission(window: &WebviewWindow, id: i64) -> Result<(), String> {
     if let Some(caller) = id_from_label(window.label()) {
         if caller != id {
             return Err(format!("浮窗只能操作自己（{caller}），不能操作 #{id}"));
+        }
+    }
+    Ok(())
+}
+
+/// 排队弹窗同样只能操作自己的窗口状态和尺寸。
+fn check_queue_permission(window: &WebviewWindow, id: i64) -> Result<(), String> {
+    if id_from_label(window.label()).is_some() {
+        return Err("悬浮字幕浮窗不能操作排队弹窗".into());
+    }
+    if let Some(caller) = queue_win::id_from_label(window.label()) {
+        if caller != id {
+            return Err(format!("排队弹窗只能操作自己（{caller}），不能操作 #{id}"));
         }
     }
     Ok(())
@@ -381,6 +398,319 @@ fn sync_and_changed(
 ) -> Result<Config, String> {
     if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == overlay_id) {
         overlay_win::sync_overlay_window(app, &cfg, apply_position)?;
+    }
+    changed(app, store)
+}
+
+// ---------- 排队队列 ----------
+
+/// 新建排队队列：默认规则「排队」、3 秒刷新、弹窗位于屏幕右侧。
+/// 与 add_overlay 一样必须是 async 命令：里面要创建 WebviewWindow。
+#[tauri::command(async)]
+pub fn add_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    let id = store.next_queue_id();
+    let index = store.get().queues.len();
+    let (x, y) = queue_win::default_queue_position(&app, index);
+    let mut cfg = crate::store::default_queue(id, crate::store::now_ms());
+    if index > 0 {
+        cfg.name = format!("排队队列 {}", index + 1);
+    }
+    cfg.x = x;
+    cfg.y = y;
+
+    store.push_queue(&cfg)?;
+    if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+        queue_win::sync_queue_window(&app, &cfg, true)?;
+    }
+    danmaku::reconcile(&app);
+    changed(&app, &store)
+}
+
+/// 更新队列的直播间、轮询间隔、正则、排序与弹窗样式。
+#[tauri::command(async)]
+pub fn update_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue: QueueConfig,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    let id = queue.id;
+    store.update_queue(&queue)?;
+    if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+        queue_win::sync_queue_window(&app, &cfg, false)?;
+    }
+    danmaku::reconcile(&app);
+    changed(&app, &store)
+}
+
+#[tauri::command(async)]
+pub fn set_queue_enabled(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    value: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.set_queue_enabled(id, value)?;
+    danmaku::reconcile(&app);
+    changed(&app, &store)
+}
+
+#[tauri::command(async)]
+pub fn set_queue_shown(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    value: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    set_queue_flag_command(&app, &window, &store, id, |q| q.shown = value)
+}
+
+#[tauri::command(async)]
+pub fn set_queue_always_top(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    value: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    set_queue_flag_command(&app, &window, &store, id, |q| q.always_on_top = value)
+}
+
+#[tauri::command(async)]
+pub fn set_queue_click_through(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    value: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    set_queue_flag_command(&app, &window, &store, id, |q| q.click_through = value)
+}
+
+fn set_queue_flag_command(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    store: &State<'_, Arc<Store>>,
+    id: i64,
+    apply: impl FnOnce(&mut QueueConfig),
+) -> Result<Config, String> {
+    check_queue_permission(window, id)?;
+    store.set_queue_flag(id, apply)?;
+    sync_queue_and_changed(app, store, id, false)
+}
+
+#[tauri::command(async)]
+pub fn move_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    x: i32,
+    y: i32,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_queue_permission(&window, id)?;
+    store.move_queue(id, x, y)?;
+    sync_queue_and_changed(&app, &store, id, true)
+}
+
+/// 队列弹窗量好内容尺寸后调用（只有 queue-* 窗口可以调）。
+#[tauri::command]
+pub fn set_queue_size(
+    app: AppHandle,
+    window: WebviewWindow,
+    width: f64,
+    height: f64,
+    store: State<'_, Arc<Store>>,
+) -> Result<(), String> {
+    let id = queue_win::id_from_label(window.label())
+        .ok_or("只有排队弹窗可以调用 set_queue_size")?;
+    let win = app
+        .get_webview_window(&queue_win::queue_label(id))
+        .ok_or("排队弹窗窗口不存在")?;
+
+    let cfg = store.get().queues.into_iter().find(|q| q.id == id);
+    let manual = cfg
+        .as_ref()
+        .map(|c| c.width > 0 && c.height > 0)
+        .unwrap_or(false);
+    let mut w = if manual {
+        cfg.as_ref().map(|c| c.width as f64).unwrap_or(60.0)
+    } else {
+        width.round().max(60.0)
+    };
+    let h = if manual {
+        cfg.as_ref().map(|c| c.height as f64).unwrap_or(40.0)
+    } else {
+        height.round().max(40.0)
+    };
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let max_logical = monitor.size().width as f64 / scale;
+        if max_logical > 0.0 {
+            w = w.min(max_logical);
+        }
+    }
+
+    win.set_size(tauri::LogicalSize::new(w, h))
+        .map_err(|e| format!("调整排队弹窗尺寸失败：{e}"))?;
+    queue_win::mark_measured(&app, id);
+    if let Some(cfg) = cfg {
+        queue_win::apply_queue_window_state(&app, &win, &cfg, false)?;
+    }
+    Ok(())
+}
+
+/// 保存队列弹窗的手动宽高；主窗口传 0/0 恢复自动按内容。
+#[tauri::command(async)]
+pub fn resize_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    width: i64,
+    height: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_queue_permission(&window, id)?;
+    let (w, h) = if width > 0 && height > 0 {
+        (width.max(60), height.max(40))
+    } else {
+        (0, 0)
+    };
+    store.set_queue_size(id, w, h)?;
+    if let Some(win) = app.get_webview_window(&queue_win::queue_label(id)) {
+        if w > 0 && h > 0 {
+            win.set_size(tauri::LogicalSize::new(w as f64, h as f64))
+                .map_err(|e| format!("调整排队弹窗尺寸失败：{e}"))?;
+            queue_win::mark_measured(&app, id);
+        }
+        if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+            queue_win::apply_queue_window_state(&app, &win, &cfg, false)?;
+        }
+    }
+    changed(&app, &store)
+}
+
+#[tauri::command(async)]
+pub fn delete_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.delete_queue(id)?;
+    if let Some(w) = app.get_webview_window(&queue_win::queue_label(id)) {
+        let _ = w.close();
+    }
+    danmaku::reconcile(&app);
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn add_queue_entry(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    nickname: String,
+    count: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.add_queue_entry(queue_id, &nickname, count)?;
+    changed(&app, &store)
+}
+
+/// 原子 +1 / -1，和弹幕实时累加不会互相覆盖。
+#[tauri::command]
+pub fn step_queue_entry(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    id: i64,
+    delta: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.step_queue_entry(queue_id, id, delta)?;
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn set_queue_entry_count(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    id: i64,
+    count: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.set_queue_entry_count(queue_id, id, count)?;
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn rename_queue_entry(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    id: i64,
+    nickname: String,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.rename_queue_entry(queue_id, id, &nickname)?;
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn delete_queue_entry(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.delete_queue_entry(queue_id, id)?;
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn clear_queue_entries(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.clear_queue_entries(queue_id)?;
+    changed(&app, &store)
+}
+
+/// 主窗口定时拉取的连接状态（只在内存，不写数据库）。
+#[tauri::command]
+pub fn get_queue_status(manager: State<'_, DanmakuManager>) -> Vec<QueueStatus> {
+    manager.statuses()
+}
+
+fn sync_queue_and_changed(
+    app: &AppHandle,
+    store: &State<'_, Arc<Store>>,
+    queue_id: i64,
+    apply_position: bool,
+) -> Result<Config, String> {
+    if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == queue_id) {
+        queue_win::sync_queue_window(app, &cfg, apply_position)?;
     }
     changed(app, store)
 }

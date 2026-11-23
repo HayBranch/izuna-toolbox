@@ -7,6 +7,8 @@
 //! - `overlays`  浮窗（套）队列：可多个，含名字/创建时间等基本信息 + 每套自己的账号
 //! - `variables` 自定义变量，归属某个浮窗（overlay_id；follow_id 表示跟随本套哪个变量）
 //! - `computed`  计算变量，归属某个浮窗（overlay_id）
+//! - `queues`    排队队列：直播间号、正则、排序方式、弹窗样式等
+//! - `queue_entries` 排队成员，归属某个队列（queue_id；uid 为 0 表示手动添加）
 //!
 //! 并发模型：`Connection` 非 `Sync`，用 `Mutex` 包一层挂进 Tauri 状态。
 //! 每次变更返回最新全量 `Config`，由命令层广播给所有窗口（单一数据源）。
@@ -15,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -98,11 +101,105 @@ pub struct OverlayConfig {
     pub computed: Vec<ComputedVar>,
 }
 
-/// 全量配置：浮窗（套）列表。
+/// 排队队列里的一个成员：同一个 uid 累计发送次数。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QueueEntry {
+    pub id: i64,
+    /// B 站 uid；0 表示主窗口手动添加的成员
+    pub uid: i64,
+    pub nickname: String,
+    /// 匹配到的弹幕条数（或手动调整后的值）
+    pub count: i64,
+    /// 首次排队时间（毫秒时间戳）
+    pub first_at: i64,
+    /// 最近一次排队时间（毫秒时间戳）
+    pub last_at: i64,
+}
+
+/// 一个排队队列 = 自己独立的直播间、正则、排序与弹窗样式。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QueueConfig {
+    pub id: i64,
+    pub name: String,
+    /// 直播间号（支持短号；0 = 未设置）
+    pub room_id: i64,
+    /// 弹幕批量写入 / 界面刷新间隔（秒）
+    pub poll_secs: u32,
+    /// 匹配弹幕文本的正则（任一命中即计数）
+    pub patterns: Vec<String>,
+    /// `time` 按首次发送时间（先到先得）| `count` 按发送次数（多到少）
+    pub sort_mode: String,
+    /// 是否监听弹幕
+    pub enabled: bool,
+    /// 弹窗最多显示多少人
+    pub max_entries: u32,
+    /// 是否显示弹窗（隐藏 ≠ 删除）
+    pub shown: bool,
+    pub always_on_top: bool,
+    pub click_through: bool,
+    /// 弹窗位置（物理像素，拖动时回写）
+    pub x: i32,
+    pub y: i32,
+    pub font_size: u32,
+    /// #RRGGBB
+    pub font_color: String,
+    pub bold: bool,
+    pub shadow: bool,
+    /// #RRGGBB
+    pub bg_color: String,
+    /// 背景不透明度 0-100
+    pub bg_opacity: u32,
+    /// 自动宽度的最大宽度（逻辑像素）
+    pub max_width: i64,
+    /// 手动尺寸（0 = 自动按内容）
+    pub width: i64,
+    pub height: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// 队列成员（按数据库 id 返回，展示顺序由 sortMode 在前端决定）
+    pub entries: Vec<QueueEntry>,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            room_id: 0,
+            poll_secs: 3,
+            patterns: vec!["排队".into()],
+            sort_mode: "time".into(),
+            enabled: true,
+            max_entries: 20,
+            shown: true,
+            always_on_top: true,
+            click_through: false,
+            x: 0,
+            y: 0,
+            font_size: 18,
+            font_color: "#ffffff".into(),
+            bold: true,
+            shadow: true,
+            bg_color: "#0f172a".into(),
+            bg_opacity: 55,
+            max_width: 360,
+            width: 0,
+            height: 0,
+            created_at: 0,
+            updated_at: 0,
+            entries: vec![],
+        }
+    }
+}
+
+/// 全量配置：浮窗（套）列表 + 排队队列列表。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     pub overlays: Vec<OverlayConfig>,
+    pub queues: Vec<QueueConfig>,
 }
 
 // ---------- 空库 / 新浮窗的默认数据（要改初始配置，只改这一段） ----------
@@ -269,8 +366,46 @@ CREATE TABLE IF NOT EXISTS computed (
     created_at  INTEGER NOT NULL,
     UNIQUE (overlay_id, key)
 );
+CREATE TABLE IF NOT EXISTS queues (
+    id             INTEGER PRIMARY KEY,
+    name           TEXT NOT NULL,
+    room_id        INTEGER NOT NULL DEFAULT 0,
+    poll_secs      INTEGER NOT NULL DEFAULT 3,
+    patterns       TEXT NOT NULL DEFAULT '[\"排队\"]',
+    sort_mode      TEXT NOT NULL DEFAULT 'time',
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    max_entries    INTEGER NOT NULL DEFAULT 20,
+    shown          INTEGER NOT NULL DEFAULT 1,
+    always_on_top  INTEGER NOT NULL DEFAULT 1,
+    click_through  INTEGER NOT NULL DEFAULT 0,
+    x              INTEGER NOT NULL DEFAULT 0,
+    y              INTEGER NOT NULL DEFAULT 0,
+    font_size      INTEGER NOT NULL DEFAULT 18,
+    font_color     TEXT NOT NULL DEFAULT '#ffffff',
+    bold           INTEGER NOT NULL DEFAULT 1,
+    shadow         INTEGER NOT NULL DEFAULT 1,
+    bg_color       TEXT NOT NULL DEFAULT '#0f172a',
+    bg_opacity     INTEGER NOT NULL DEFAULT 55,
+    max_width      INTEGER NOT NULL DEFAULT 360,
+    width          INTEGER NOT NULL DEFAULT 0,
+    height         INTEGER NOT NULL DEFAULT 0,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS queue_entries (
+    id          INTEGER PRIMARY KEY,
+    queue_id    INTEGER NOT NULL,
+    uid         INTEGER NOT NULL DEFAULT 0,
+    nickname    TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 1,
+    first_at    INTEGER NOT NULL,
+    last_at     INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_variables_overlay ON variables(overlay_id);
 CREATE INDEX IF NOT EXISTS idx_computed_overlay  ON computed(overlay_id);
+CREATE INDEX IF NOT EXISTS idx_queue_entries_queue ON queue_entries(queue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_uid
+    ON queue_entries(queue_id, uid) WHERE uid > 0;
 ";
 
 impl Store {
@@ -454,7 +589,8 @@ impl Store {
                 overlays.push(cfg);
             }
         }
-        Config { overlays }
+        let queues = load_queues(&conn);
+        Config { overlays, queues }
     }
 
     pub fn overlay_exists(&self, id: i64) -> bool {
@@ -869,6 +1005,391 @@ impl Store {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    // ---------- 排队队列 ----------
+
+    /// 新队列 id：毫秒时间戳与现有最大 id+1 取大，保证单调唯一。
+    pub fn next_queue_id(&self) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        let max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM queues", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        now_ms().max(max + 1)
+    }
+
+    pub fn push_queue(&self, cfg: &QueueConfig) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        insert_queue(&conn, cfg)
+    }
+
+    pub fn queue_exists(&self, id: i64) -> bool {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        conn.query_row("SELECT 1 FROM queues WHERE id = ?1", params![id], |_| {
+            Ok(())
+        })
+        .is_ok()
+    }
+
+    /// 供弹幕工作线程读取最新配置（不含成员，避免每次轮询都查一遍名单）。
+    pub fn get_queue(&self, id: i64) -> Option<QueueConfig> {
+        let conn = self.conn.lock().ok()?;
+        let mut cfg = conn
+            .query_row(
+                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at FROM queues WHERE id = ?1",
+                params![id],
+                map_queue_row,
+            )
+            .optional()
+            .ok()??;
+        cfg.entries = vec![];
+        Some(cfg)
+    }
+
+    /// 更新队列的直播间、正则、排序与弹窗样式（不动位置与显隐开关）。
+    pub fn update_queue(&self, cfg: &QueueConfig) -> Result<(), String> {
+        let patterns = Self::validate_patterns(&cfg.patterns)?;
+        let patterns_json = serde_json::to_string(&patterns).map_err(|e| e.to_string())?;
+        let sort_mode = if cfg.sort_mode == "count" { "count" } else { "time" };
+        let room_id = cfg.room_id.max(0);
+        let poll_secs = cfg.poll_secs.clamp(1, 60) as i64;
+        let max_entries = cfg.max_entries.clamp(1, 100) as i64;
+        let font_size = cfg.font_size.clamp(10, 72) as i64;
+        let bg_opacity = cfg.bg_opacity.clamp(0, 100) as i64;
+        let max_width = if cfg.max_width <= 0 {
+            360
+        } else {
+            cfg.max_width.clamp(80, 3000)
+        };
+        let name = cfg.name.trim();
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queues SET name = ?1, room_id = ?2, poll_secs = ?3, patterns = ?4, sort_mode = ?5, enabled = ?6, max_entries = ?7, font_size = ?8, font_color = ?9, bold = ?10, shadow = ?11, bg_color = ?12, bg_opacity = ?13, max_width = ?14, updated_at = ?15 WHERE id = ?16",
+                params![
+                    name,
+                    room_id,
+                    poll_secs,
+                    patterns_json,
+                    sort_mode,
+                    cfg.enabled as i64,
+                    max_entries,
+                    font_size,
+                    cfg.font_color,
+                    cfg.bold as i64,
+                    cfg.shadow as i64,
+                    cfg.bg_color,
+                    bg_opacity,
+                    max_width,
+                    now_ms(),
+                    cfg.id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("队列 #{} 不存在", cfg.id));
+        }
+        Ok(())
+    }
+
+    /// 校验并清洗正则：逐行去掉空白行，全部编译一遍；至少保留一条。
+    pub fn validate_patterns(patterns: &[String]) -> Result<Vec<String>, String> {
+        let mut cleaned = Vec::new();
+        for (i, p) in patterns.iter().enumerate() {
+            let p = p.trim();
+            if p.is_empty() {
+                continue;
+            }
+            Regex::new(p).map_err(|e| format!("第 {} 条正则不合法：{e}", i + 1))?;
+            cleaned.push(p.to_string());
+        }
+        if cleaned.is_empty() {
+            return Err("至少保留一个正则表达式（例如：排队）".into());
+        }
+        Ok(cleaned)
+    }
+
+    pub fn set_queue_enabled(&self, id: i64, value: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queues SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+                params![value as i64, now_ms(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("队列 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    pub fn set_queue_flag(
+        &self,
+        id: i64,
+        apply: impl FnOnce(&mut QueueConfig),
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let (shown, top, through): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT shown, always_on_top, click_through FROM queues WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|_| format!("队列 #{id} 不存在"))?;
+        let mut probe = QueueConfig {
+            shown: shown != 0,
+            always_on_top: top != 0,
+            click_through: through != 0,
+            ..Default::default()
+        };
+        apply(&mut probe);
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE queues SET shown = ?2, always_on_top = ?3, click_through = ?4, updated_at = ?5 WHERE id = ?1",
+            params![
+                id,
+                probe.shown as i64,
+                probe.always_on_top as i64,
+                probe.click_through as i64,
+                now_ms()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn move_queue(&self, id: i64, x: i32, y: i32) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queues SET x = ?1, y = ?2 WHERE id = ?3",
+                params![x, y, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("队列 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    /// 拖动弹窗时由 Moved 事件回写位置（不刷新修改时间）。
+    pub fn set_queue_position(&self, id: i64, x: i32, y: i32) {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _ = conn.execute(
+            "UPDATE queues SET x = ?1, y = ?2 WHERE id = ?3",
+            params![x, y, id],
+        );
+    }
+
+    /// 保存队列弹窗的手动宽高（0/0 = 恢复自动按内容）。
+    pub fn set_queue_size(&self, id: i64, width: i64, height: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queues SET width = ?1, height = ?2, updated_at = ?3 WHERE id = ?4",
+                params![width, height, now_ms(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("队列 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    pub fn delete_queue(&self, id: i64) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM queue_entries WHERE queue_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM queues WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 主窗口手动添加成员：已有同名成员则累加次数，否则新建（uid = 0）。
+    pub fn add_queue_entry(&self, queue_id: i64, nickname: &str, count: i64) -> Result<(), String> {
+        let nickname = nickname.trim();
+        if nickname.is_empty() {
+            return Err("昵称不能为空".into());
+        }
+        if !self.queue_exists(queue_id) {
+            return Err("队列不存在，先创建队列".into());
+        }
+        let add = count.clamp(1, 999_999);
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM queue_entries WHERE queue_id = ?1 AND nickname = ?2 ORDER BY id LIMIT 1",
+                params![queue_id, nickname],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let now = now_ms();
+        if let Some(id) = existing {
+            tx.execute(
+                "UPDATE queue_entries SET count = count + ?1, last_at = ?2 WHERE id = ?3",
+                params![add, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute(
+                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at) VALUES (?1, 0, ?2, ?3, ?4, ?4)",
+                params![queue_id, nickname, add, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 原子增减次数（下限 0），避免和弹幕实时累加互相覆盖。
+    pub fn step_queue_entry(&self, queue_id: i64, id: i64, delta: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queue_entries SET count = MAX(0, count + ?1), last_at = ?2 WHERE id = ?3 AND queue_id = ?4",
+                params![delta, now_ms(), id, queue_id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("成员 #{id} 不存在（或不属于该队列）"));
+        }
+        Ok(())
+    }
+
+    /// 直接指定次数（用于输入框精确修改）。
+    pub fn set_queue_entry_count(
+        &self,
+        queue_id: i64,
+        id: i64,
+        count: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queue_entries SET count = ?1, last_at = ?2 WHERE id = ?3 AND queue_id = ?4",
+                params![count.clamp(0, 999_999), now_ms(), id, queue_id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("成员 #{id} 不存在（或不属于该队列）"));
+        }
+        Ok(())
+    }
+
+    pub fn rename_queue_entry(
+        &self,
+        queue_id: i64,
+        id: i64,
+        nickname: &str,
+    ) -> Result<(), String> {
+        let nickname = nickname.trim();
+        if nickname.is_empty() {
+            return Err("昵称不能为空".into());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queue_entries SET nickname = ?1 WHERE id = ?2 AND queue_id = ?3",
+                params![nickname, id, queue_id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("成员 #{id} 不存在（或不属于该队列）"));
+        }
+        Ok(())
+    }
+
+    pub fn delete_queue_entry(&self, queue_id: i64, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM queue_entries WHERE id = ?1 AND queue_id = ?2",
+            params![id, queue_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_queue_entries(&self, queue_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM queue_entries WHERE queue_id = ?1",
+            params![queue_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 弹幕工作线程匹配到命中后调用：同一 uid 累加次数，新用户插入。
+    /// 返回实际写入的命中条数（0 = 队列已在其它窗口被删除，忽略）。
+    pub fn record_queue_matches(
+        &self,
+        queue_id: i64,
+        hits: &[(i64, String, i64)],
+    ) -> Result<usize, String> {
+        if hits.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let exists: Option<i64> = tx
+            .query_row("SELECT 1 FROM queues WHERE id = ?1", params![queue_id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if exists.is_none() {
+            return Ok(0);
+        }
+        let now = now_ms();
+        let mut changed = 0usize;
+        for (uid, nickname, at) in hits {
+            if *uid <= 0 {
+                continue;
+            }
+            let nickname = nickname.trim();
+            if nickname.is_empty() {
+                continue;
+            }
+            let at = if *at > 0 { *at } else { now };
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = ?2",
+                    params![queue_id, uid],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some(id) = existing {
+                tx.execute(
+                    "UPDATE queue_entries SET count = count + 1, nickname = ?1, last_at = MAX(last_at, ?2), first_at = MIN(first_at, ?2) WHERE id = ?3",
+                    params![nickname, at, id],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at) VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+                    params![queue_id, uid, nickname, at],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            changed += 1;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
 }
 
 /// 写入一条浮窗记录（新浮窗与空库初始化共用）。
@@ -886,6 +1407,141 @@ fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> 
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 写入一条排队队列记录。
+fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
+    let patterns = serde_json::to_string(&cfg.patterns).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        params![
+            cfg.id, cfg.name, cfg.room_id, cfg.poll_secs as i64, patterns, cfg.sort_mode,
+            cfg.enabled as i64, cfg.max_entries as i64, cfg.shown as i64,
+            cfg.always_on_top as i64, cfg.click_through as i64, cfg.x, cfg.y,
+            cfg.font_size as i64, cfg.font_color, cfg.bold as i64, cfg.shadow as i64,
+            cfg.bg_color, cfg.bg_opacity as i64, cfg.max_width, cfg.width, cfg.height,
+            cfg.created_at, cfg.updated_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
+    let patterns: String = row.get(4)?;
+    Ok(QueueConfig {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        room_id: row.get(2)?,
+        poll_secs: row.get::<_, i64>(3)?.max(1) as u32,
+        patterns: serde_json::from_str(&patterns).unwrap_or_else(|_| vec!["排队".into()]),
+        sort_mode: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        max_entries: row.get::<_, i64>(7)?.max(1) as u32,
+        shown: row.get::<_, i64>(8)? != 0,
+        always_on_top: row.get::<_, i64>(9)? != 0,
+        click_through: row.get::<_, i64>(10)? != 0,
+        x: row.get(11)?,
+        y: row.get(12)?,
+        font_size: row.get::<_, i64>(13)?.max(10) as u32,
+        font_color: row.get(14)?,
+        bold: row.get::<_, i64>(15)? != 0,
+        shadow: row.get::<_, i64>(16)? != 0,
+        bg_color: row.get(17)?,
+        bg_opacity: row.get::<_, i64>(18)?.clamp(0, 100) as u32,
+        max_width: row.get(19)?,
+        width: row.get(20)?,
+        height: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
+        entries: vec![],
+    })
+}
+
+/// 加载所有排队队列（含成员）。
+fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at FROM queues ORDER BY id",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("查询 queues 失败：{e}");
+            return vec![];
+        }
+    };
+    let rows = stmt.query_map([], map_queue_row);
+    match rows {
+        Ok(rows) => rows
+            .filter_map(|r| r.ok())
+            .map(|mut cfg| {
+                cfg.entries = load_queue_entries(conn, cfg.id);
+                cfg
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("读取 queues 失败：{e}");
+            vec![]
+        }
+    }
+}
+
+fn load_queue_entries(conn: &Connection, queue_id: i64) -> Vec<QueueEntry> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, uid, nickname, count, first_at, last_at FROM queue_entries WHERE queue_id = ?1 ORDER BY id",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("查询 queue_entries 失败：{e}");
+            return vec![];
+        }
+    };
+    stmt.query_map(params![queue_id], |row| {
+        Ok(QueueEntry {
+            id: row.get(0)?,
+            uid: row.get(1)?,
+            nickname: row.get(2)?,
+            count: row.get(3)?,
+            first_at: row.get(4)?,
+            last_at: row.get(5)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_else(|e| {
+        eprintln!("读取 queue_entries 失败：{e}");
+        vec![]
+    })
+}
+
+/// 新排队队列的默认配置（位置由命令层根据主显示器计算后填入）。
+pub fn default_queue(id: i64, created_at: i64) -> QueueConfig {
+    QueueConfig {
+        id,
+        name: "排队队列".into(),
+        room_id: 0,
+        poll_secs: 3,
+        patterns: vec!["排队".into()],
+        sort_mode: "time".into(),
+        enabled: true,
+        max_entries: 20,
+        shown: true,
+        always_on_top: true,
+        click_through: false,
+        x: 0,
+        y: 0,
+        font_size: 18,
+        font_color: "#ffffff".into(),
+        bold: true,
+        shadow: true,
+        bg_color: "#0f172a".into(),
+        bg_opacity: 55,
+        max_width: 360,
+        width: 0,
+        height: 0,
+        created_at,
+        updated_at: created_at,
+        entries: vec![],
+    }
 }
 
 /// 给单个变量加减 delta（下限 0），返回实际变化量。
@@ -1260,5 +1916,80 @@ mod tests {
         // 计算变量还在，不应重复插入
         assert_eq!(store.get().overlays[0].computed.len(), SEED_COMPUTED.len());
         cleanup(store, dir);
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn queue_crud_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("izuna_queue_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+        let id = store.next_queue_id();
+        let cfg = default_queue(id, now_ms());
+        store.push_queue(&cfg).unwrap();
+        assert!(store.queue_exists(id));
+
+        let base = now_ms() - 10_000;
+        store
+            .record_queue_matches(
+                id,
+                &[(1001, "阿一".into(), base), (1002, "阿二".into(), base + 1000)],
+            )
+            .unwrap();
+        store
+            .record_queue_matches(id, &[(1001, "阿一改名".into(), base + 2000)])
+            .unwrap();
+
+        let q = store.get_queue(id).unwrap();
+        assert_eq!(q.patterns, vec!["排队".to_string()]);
+        let all = store.get().queues;
+        let q = all.iter().find(|q| q.id == id).unwrap();
+        assert_eq!(q.entries.len(), 2);
+        let one = q.entries.iter().find(|e| e.uid == 1001).unwrap();
+        assert_eq!(one.count, 2);
+        assert_eq!(one.nickname, "阿一改名");
+        assert_eq!(one.first_at, base);
+        assert_eq!(one.last_at, base + 2000);
+
+        store.step_queue_entry(id, one.id, -1).unwrap();
+        store.set_queue_entry_count(id, one.id, 7).unwrap();
+        store.rename_queue_entry(id, one.id, "新名字").unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        let one = q.entries.iter().find(|e| e.uid == 1001).unwrap();
+        assert_eq!((one.count, one.nickname.as_str()), (7, "新名字"));
+
+        let mut edit = q.clone();
+        edit.patterns = vec!["排队".into(), "^上车$".into()];
+        edit.sort_mode = "count".into();
+        edit.name = "测试队列".into();
+        store.update_queue(&edit).unwrap();
+        let q = store.get_queue(id).unwrap();
+        assert_eq!(q.name, "测试队列");
+        assert_eq!(q.patterns.len(), 2);
+        assert_eq!(q.sort_mode, "count");
+
+        store.add_queue_entry(id, "手动成员", 3).unwrap();
+        store.add_queue_entry(id, "手动成员", 2).unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        let manual = q.entries.iter().find(|e| e.nickname == "手动成员").unwrap();
+        assert_eq!(manual.count, 5);
+
+        store.delete_queue_entry(id, one.id).unwrap();
+        store.clear_queue_entries(id).unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        assert!(q.entries.is_empty());
+
+        store.delete_queue(id).unwrap();
+        assert!(!store.queue_exists(id));
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

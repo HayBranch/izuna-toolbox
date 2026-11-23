@@ -1,15 +1,19 @@
 //! 泉奈工具箱 · 应用装配
 //!
 //! 窗口结构：
-//! - `main`：主窗口（配置界面：数据计数 + 悬浮字幕管理）
+//! - `main`：主窗口（配置界面：悬浮字幕 + 排队队列）
 //! - `overlay-{id}`：N 个悬浮字幕浮窗，无边框透明置顶小窗，可被直播软件窗口捕获
+//! - `queue-{id}`：N 个排队队列弹窗，复用同款透明窗口框架
 //!
 //! 数据流（单一真相在 Rust SQLite）：
 //! 主窗口编辑 → invoke 命令 → SQLite 提交 → `emit("config-changed")` 广播全量配置
-//! → 各浮窗页面按自己的 label 渲染模板；拖动浮窗 → `Moved` 事件回写位置。
+//! → 各浮窗页面按自己的 label 渲染内容；拖动浮窗 → `Moved` 事件回写位置。
+//! B 站弹幕由 `danmaku` 模块的长连接任务实时接收，按队列配置的间隔批量写入。
 
 mod commands;
+mod danmaku;
 mod overlay_win;
+mod queue_win;
 mod store;
 mod tray;
 mod updater;
@@ -17,8 +21,9 @@ mod updater;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::Manager;
+use serde::Serialize;
 use store::Store;
+use tauri::Manager;
 
 /// 便携模式标记文件名：放在 exe 同目录即可启用便携数据目录。
 const PORTABLE_FLAG: &str = "portable.flag";
@@ -55,6 +60,7 @@ pub fn run() {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
                 overlay_win::sync_all_overlay_windows(app);
+                queue_win::sync_all_queue_windows(app);
             }
         }));
     }
@@ -80,20 +86,36 @@ pub fn run() {
             app.manage(overlay_win::MeasuredSet(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )));
+            app.manage(queue_win::QueueMeasuredSet(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )));
             app.manage(std::sync::Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(1),
             ));
             // 自动更新的取消标志（download_update / cancel_update 共用）
             app.manage(updater::UpdateState::default());
+            // B 站弹幕任务管理器（队列连接状态 + 取消标志）
+            app.manage(danmaku::DanmakuManager::default());
 
-            // 3. 为已有配置的浮窗创建窗口（保持隐藏，等浮窗页面量好尺寸再显示）
-            for cfg in store.get().overlays {
-                if let Err(e) = overlay_win::create_overlay_window(app.handle(), &cfg) {
+            let config = store.get();
+
+            // 3. 为已有配置的浮窗 / 排队弹窗创建窗口
+            //    （保持隐藏，等页面量好尺寸再显示）
+            for cfg in &config.overlays {
+                if let Err(e) = overlay_win::create_overlay_window(app.handle(), cfg) {
                     eprintln!("启动浮窗 #{} 失败：{e}", cfg.id);
                 }
             }
+            for cfg in &config.queues {
+                if let Err(e) = queue_win::create_queue_window(app.handle(), cfg) {
+                    eprintln!("启动排队弹窗 #{} 失败：{e}", cfg.id);
+                }
+            }
 
-            // 4. 托盘
+            // 4. 启动所有启用中的排队队列弹幕监听
+            danmaku::reconcile(app.handle());
+
+            // 5. 托盘
             tray::create_tray(app.handle())?;
 
             Ok(())
@@ -108,23 +130,11 @@ pub fn run() {
                         api.prevent_close();
                         let _ = window.hide();
                         overlay_win::sync_all_overlay_windows(window.app_handle());
+                        queue_win::sync_all_queue_windows(window.app_handle());
                     } else if let Some(id) = overlay_win::id_from_label(window.label()) {
-                        let app = window.app_handle();
-                        let store = app.state::<Arc<Store>>();
-                        let exists = store.get().overlays.iter().any(|o| o.id == id);
-                        if exists {
-                            api.prevent_close();
-                            if store.set_flag(id, |o| o.shown = false).is_ok() {
-                                if let Some(cfg) =
-                                    store.get().overlays.into_iter().find(|o| o.id == id)
-                                {
-                                    let _ =
-                                        overlay_win::sync_overlay_window(app, &cfg, false);
-                                }
-                                use tauri::Emitter;
-                                let _ = app.emit(commands::CONFIG_CHANGED_EVENT, &store.get());
-                            }
-                        }
+                        close_popup_like(window, api, id, false);
+                    } else if let Some(id) = queue_win::id_from_label(window.label()) {
+                        close_popup_like(window, api, id, true);
                     }
                 }
                 // 主窗口焦点变化：重应用所有浮窗状态（主窗口聚焦时临时取消置顶，
@@ -132,6 +142,7 @@ pub fn run() {
                 tauri::WindowEvent::Focused(_) => {
                     if window.label() == "main" {
                         overlay_win::sync_all_overlay_windows(window.app_handle());
+                        queue_win::sync_all_queue_windows(window.app_handle());
                     }
                 }
                 // 拖动浮窗：回写位置到数据库；同时节流广播给主窗口刷新坐标输入框
@@ -139,22 +150,27 @@ pub fn run() {
                     if let Some(id) = overlay_win::id_from_label(window.label()) {
                         let store = window.app_handle().state::<Arc<Store>>();
                         store.set_position(id, position.x, position.y);
-                        let throttle = window
-                            .app_handle()
-                            .state::<std::sync::Mutex<std::time::Instant>>();
-                        let mut last = throttle.lock().unwrap();
-                        if last.elapsed() >= std::time::Duration::from_millis(100) {
-                            *last = std::time::Instant::now();
-                            use tauri::Emitter;
-                            let _ = window.app_handle().emit(
-                                "overlay-moved",
-                                overlay_win::MovedEvent {
-                                    id,
-                                    x: position.x,
-                                    y: position.y,
-                                },
-                            );
-                        }
+                        emit_moved(
+                            window.app_handle(),
+                            "overlay-moved",
+                            overlay_win::MovedEvent {
+                                id,
+                                x: position.x,
+                                y: position.y,
+                            },
+                        );
+                    } else if let Some(id) = queue_win::id_from_label(window.label()) {
+                        let store = window.app_handle().state::<Arc<Store>>();
+                        store.set_queue_position(id, position.x, position.y);
+                        emit_moved(
+                            window.app_handle(),
+                            "queue-moved",
+                            queue_win::QueueMovedEvent {
+                                id,
+                                x: position.x,
+                                y: position.y,
+                            },
+                        );
                     }
                 }
                 _ => {}
@@ -178,6 +194,23 @@ pub fn run() {
             commands::delete_overlay,
             commands::set_overlay_size,
             commands::resize_overlay,
+            commands::add_queue,
+            commands::update_queue,
+            commands::set_queue_enabled,
+            commands::set_queue_shown,
+            commands::set_queue_always_top,
+            commands::set_queue_click_through,
+            commands::move_queue,
+            commands::set_queue_size,
+            commands::resize_queue,
+            commands::delete_queue,
+            commands::add_queue_entry,
+            commands::step_queue_entry,
+            commands::set_queue_entry_count,
+            commands::rename_queue_entry,
+            commands::delete_queue_entry,
+            commands::clear_queue_entries,
+            commands::get_queue_status,
             commands::set_main_always_on_top,
             commands::open_url,
             updater::download_update,
@@ -187,4 +220,60 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");
+}
+
+/// 关闭浮窗 / 排队弹窗的默认行为：仍存在于数据库时改为「隐藏」，
+/// 只有删除流程（记录已删）才能真正关掉窗口。
+fn close_popup_like(
+    window: &tauri::Window,
+    api: &tauri::CloseRequestApi,
+    id: i64,
+    is_queue: bool,
+) {
+    let app = window.app_handle();
+    let store = app.state::<Arc<Store>>();
+    let config = store.get();
+    if is_queue {
+        if !config.queues.iter().any(|q| q.id == id) {
+            return;
+        }
+        api.prevent_close();
+        if store.set_queue_flag(id, |q| q.shown = false).is_ok() {
+            if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+                let _ = queue_win::sync_queue_window(app, &cfg, false);
+            }
+            broadcast_config(app, &store);
+        }
+    } else {
+        if !config.overlays.iter().any(|o| o.id == id) {
+            return;
+        }
+        api.prevent_close();
+        if store.set_flag(id, |o| o.shown = false).is_ok() {
+            if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+                let _ = overlay_win::sync_overlay_window(app, &cfg, false);
+            }
+            broadcast_config(app, &store);
+        }
+    }
+}
+
+fn broadcast_config(app: &tauri::AppHandle, store: &Arc<Store>) {
+    use tauri::Emitter;
+    let _ = app.emit(commands::CONFIG_CHANGED_EVENT, store.get());
+}
+
+/// 拖动弹窗时广播位置（节流 100ms），主窗口据此刷新 X/Y 输入框。
+fn emit_moved<P: Serialize + Clone>(
+    app: &tauri::AppHandle,
+    event: &str,
+    payload: P,
+) {
+    let throttle = app.state::<std::sync::Mutex<std::time::Instant>>();
+    let mut last = throttle.lock().unwrap();
+    if last.elapsed() >= std::time::Duration::from_millis(100) {
+        *last = std::time::Instant::now();
+        use tauri::Emitter;
+        let _ = app.emit(event, payload);
+    }
 }

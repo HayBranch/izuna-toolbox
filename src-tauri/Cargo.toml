@@ -23,14 +23,21 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
 tauri-plugin-single-instance = "2"
+# 排队队列的正则校验（纯 Rust，无 C 依赖）
+regex = "1"
+serde_json = "1"
 
-# 自动更新只在 Windows 实现（应用只发布 Windows 版）。
+# 自动更新与 B 站弹幕只在 Windows 实现（应用只发布 Windows 版）。
 # gate 到 cfg(windows)：Linux 原生构建（CNB）完全不编译这些依赖，也就不需要
 # OpenSSL；windows-gnu 交叉编译只会带上 native-tls→schannel（纯 Rust，无 C 代码）。
 # reqwest 默认特性已含 default-tls(native-tls) + system-proxy(尊重系统代理) + http2。
+# tokio-tungstenite 用于 B 站直播弹幕的 WebSocket 长连接（zlib 解压）。
 [target.'cfg(windows)'.dependencies]
 reqwest = { version = "0.12", features = ["stream"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "macros"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+futures-util = { version = "0.3", features = ["sink"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [profile.release]
 codegen-units = 1

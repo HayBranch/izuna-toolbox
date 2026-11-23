@@ -8,7 +8,14 @@
  *  直接 publish 最新配置，本窗口立即刷新；广播只负责其它窗口的同步。
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, ComputedVar, OverlayConfig, UserVar } from "./types";
+import type {
+  AppConfig,
+  ComputedVar,
+  OverlayConfig,
+  QueueConfig,
+  QueueStatus,
+  UserVar,
+} from "./types";
 
 type ConfigListener = (c: AppConfig) => void;
 const listeners = new Set<ConfigListener>();
@@ -103,6 +110,61 @@ export const updateComputed = (overlayId: number, computed: ComputedVar) =>
 
 export const deleteComputed = (overlayId: number, id: number) =>
   cfged(invoke<AppConfig>("delete_computed", { overlayId, id }));
+
+// ---------- 排队队列 ----------
+
+export const addQueue = () => cfged(invoke<AppConfig>("add_queue"));
+
+/** 保存队列的直播间、正则、排序与弹窗样式（位置/显隐走独立命令） */
+export const updateQueue = (queue: QueueConfig) =>
+  cfged(invoke<AppConfig>("update_queue", { queue }));
+
+export const setQueueEnabled = (id: number, value: boolean) =>
+  cfged(invoke<AppConfig>("set_queue_enabled", { id, value }));
+
+export const setQueueShown = (id: number, value: boolean) =>
+  cfged(invoke<AppConfig>("set_queue_shown", { id, value }));
+
+export const setQueueAlwaysTop = (id: number, value: boolean) =>
+  cfged(invoke<AppConfig>("set_queue_always_top", { id, value }));
+
+export const setQueueClickThrough = (id: number, value: boolean) =>
+  cfged(invoke<AppConfig>("set_queue_click_through", { id, value }));
+
+export const moveQueue = (id: number, x: number, y: number) =>
+  cfged(invoke<AppConfig>("move_queue", { id, x, y }));
+
+export const deleteQueue = (id: number) =>
+  cfged(invoke<AppConfig>("delete_queue", { id }));
+
+/** 排队弹窗量好内容尺寸后调用（仅 queue-* 窗口可调） */
+export const setQueueSize = (width: number, height: number) =>
+  invoke<void>("set_queue_size", { width, height });
+
+/** 保存排队弹窗手动宽高；0/0 恢复自动按内容 */
+export const resizeQueue = (id: number, width: number, height: number) =>
+  cfged(invoke<AppConfig>("resize_queue", { id, width, height }));
+
+export const addQueueEntry = (queueId: number, nickname: string, count = 1) =>
+  cfged(invoke<AppConfig>("add_queue_entry", { queueId, nickname, count }));
+
+export const stepQueueEntry = (queueId: number, id: number, delta: number) =>
+  cfged(invoke<AppConfig>("step_queue_entry", { queueId, id, delta }));
+
+export const setQueueEntryCount = (queueId: number, id: number, count: number) =>
+  cfged(invoke<AppConfig>("set_queue_entry_count", { queueId, id, count }));
+
+export const renameQueueEntry = (queueId: number, id: number, nickname: string) =>
+  cfged(invoke<AppConfig>("rename_queue_entry", { queueId, id, nickname }));
+
+export const deleteQueueEntry = (queueId: number, id: number) =>
+  cfged(invoke<AppConfig>("delete_queue_entry", { queueId, id }));
+
+export const clearQueueEntries = (queueId: number) =>
+  cfged(invoke<AppConfig>("clear_queue_entries", { queueId }));
+
+/** 主窗口定时查询各队列的弹幕连接状态 */
+export const getQueueStatus = () => invoke<QueueStatus[]>("get_queue_status");
 
 // ---------- 杂项 ----------
 

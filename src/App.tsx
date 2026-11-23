@@ -2,7 +2,8 @@
  * 应用入口：
  * - 纯浏览器打开（没跑 tauri）：显示提示；
  * - 浮窗窗口（label = overlay-{id}）：渲染 OverlayWindow；
- * - 其他：主窗口外壳（单页：悬浮字幕的全部配置）。
+ * - 排队弹窗（label = queue-{id}）：渲染 QueueWindow；
+ * - 其他：主窗口外壳（悬浮字幕 / 排队队列两个页面）。
  */
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
@@ -12,6 +13,8 @@ import { getConfig, openUrl, setMainAlwaysOnTop, subscribeConfig } from "./api";
 import izunaIcon from "./assets/izuna-icon.png";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
+import QueuesPage from "./components/QueuesPage";
+import QueueWindow from "./components/QueueWindow";
 import UpdateDialog from "./components/UpdateDialog";
 import { applyThemeMode, getThemeMode, setThemeMode, type ThemeMode } from "./theme";
 import type { AppConfig, MovedEvent } from "./types";
@@ -19,6 +22,7 @@ import { checkForUpdate, markChecked, shouldStartupCheck, type UpdateInfo } from
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 const isOverlay = isTauri && getCurrentWindow().label.startsWith("overlay-");
+const isQueue = isTauri && getCurrentWindow().label.startsWith("queue-");
 /** 主窗口置顶偏好（localStorage 跟随 WebView 用户目录，重开窗口后恢复） */
 const PIN_STORAGE_KEY = "izuna.main.alwaysOnTop";
 
@@ -43,10 +47,14 @@ export default function App() {
     );
   }
   if (isOverlay) return <OverlayWindow />;
+  if (isQueue) return <QueueWindow />;
   return <MainShell />;
 }
 
+type MainPage = "overlays" | "queues";
+
 function MainShell() {
+  const [page, setPage] = useState<MainPage>("overlays");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -165,6 +173,21 @@ function MainShell() {
           );
         }),
       );
+      offs.push(
+        await listen<MovedEvent>("queue-moved", (e) => {
+          if (!alive) return;
+          setConfig((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  queues: prev.queues.map((q) =>
+                    q.id === e.payload.id ? { ...q, x: e.payload.x, y: e.payload.y } : q,
+                  ),
+                }
+              : prev,
+          );
+        }),
+      );
     };
     register();
     loadConfig();
@@ -218,11 +241,19 @@ function MainShell() {
           </div>
         </div>
 
-        <nav className="px-3">
-          <div className="flex items-center gap-3 rounded-xl bg-sky-500/15 px-3 py-2.5 text-sm text-sky-700 dark:text-sky-300">
-            <span className="text-base">🪟</span>
-            <span className="font-medium">悬浮字幕</span>
-          </div>
+        <nav className="space-y-1 px-3">
+          <NavItem
+            icon="🪟"
+            label="悬浮字幕"
+            active={page === "overlays"}
+            onClick={() => setPage("overlays")}
+          />
+          <NavItem
+            icon="💬"
+            label="排队队列"
+            active={page === "queues"}
+            onClick={() => setPage("queues")}
+          />
         </nav>
 
         <footer className="mt-auto space-y-3 px-5 pb-5 text-xs leading-5 text-slate-500 dark:text-slate-600">
@@ -259,13 +290,16 @@ function MainShell() {
         </footer>
       </aside>
 
-      {/* 内容区：列表 → 点开一张卡进入该浮窗的全部配置 */}
+      {/* 内容区：按左侧导航切换「悬浮字幕 / 排队队列」 */}
       <main className="min-w-0 flex-1 overflow-y-auto p-8">
         <header className="mb-6">
-          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">悬浮字幕</h2>
+          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
+            {page === "overlays" ? "悬浮字幕" : "排队队列"}
+          </h2>
           <p className="mt-1 text-sm text-slate-500">
-            可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式）。
-            先在列表里看基本信息，点进去配置详情。
+            {page === "overlays"
+              ? "可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式）。先在列表里看基本信息，点进去配置详情。"
+              : "接入 B 站直播弹幕，按正则把「排队」等弹幕记成名单：每个队列独立直播间、规则、排序与透明弹窗。"}
           </p>
         </header>
 
@@ -285,8 +319,10 @@ function MainShell() {
           ) : (
             <p className="animate-pulse text-sm text-slate-500">正在从 Rust 加载配置…</p>
           )
-        ) : (
+        ) : page === "overlays" ? (
           <OverlaysPage config={config} />
+        ) : (
+          <QueuesPage config={config} />
         )}
       </main>
 
@@ -323,6 +359,35 @@ function MainShell() {
         </div>
       )}
     </div>
+  );
+}
+
+/** 左侧导航项：当前页高亮 */
+function NavItem({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+        active
+          ? "bg-sky-500/15 text-sky-700 dark:text-sky-300"
+          : "text-slate-500 hover:bg-slate-500/10 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+      }`}
+    >
+      <span className="text-base">{icon}</span>
+      <span className={active ? "font-medium" : ""}>{label}</span>
+    </button>
   );
 }
 
@@ -430,9 +495,10 @@ function AboutDialog({
 
         <p className="mt-4 text-sm leading-6 text-slate-500 dark:text-slate-400">
           为直播玩家打造的本地小工具：把战绩数据做成一枚可被 OBS
-          等直播软件捕获的悬浮字幕浮窗。支持多套浮窗（各自独立的变量与模板）、
+          等直播软件捕获的悬浮字幕浮窗，还能接入 B 站直播弹幕、按正则自动统计排队名单并显示在独立弹窗里。
+          支持多套浮窗（各自独立的变量与模板）、多套排队队列（各自直播间/规则/排序）、
           自定义变量与表达式计算、百分比格式化、多行换行排版；数据全部保存在本地
-          SQLite、不会上传，仅「检查更新」会连接 GitHub。
+          SQLite、不会上传，仅「检查更新」会连接 GitHub，排队队列会连接 B 站获取公开弹幕。
         </p>
 
         <div className="mt-4 space-y-1.5 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-5 dark:border-slate-800 dark:bg-slate-950/60">
