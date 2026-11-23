@@ -60,6 +60,6 @@ fn toggle_main_window(app: &AppHandle) {
                 show_main_window(app);
             }
         }
-        None => eprintln!("主窗口不存在"),
+        None => log::warn!("主窗口不存在"),
     }
 }

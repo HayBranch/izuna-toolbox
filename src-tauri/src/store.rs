@@ -540,7 +540,7 @@ impl Store {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("数据库加锁失败：{e}");
+                log::error!("数据库加锁失败：{e}");
                 return Config::default();
             }
         };
@@ -550,7 +550,7 @@ impl Store {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("查询 overlays 失败：{e}");
+                log::error!("查询 overlays 失败：{e}");
                 return Config::default();
             }
         };
@@ -1466,7 +1466,7 @@ fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("查询 queues 失败：{e}");
+            log::error!("查询 queues 失败：{e}");
             return vec![];
         }
     };
@@ -1480,7 +1480,7 @@ fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
             })
             .collect(),
         Err(e) => {
-            eprintln!("读取 queues 失败：{e}");
+            log::error!("读取 queues 失败：{e}");
             vec![]
         }
     }
@@ -1492,7 +1492,7 @@ fn load_queue_entries(conn: &Connection, queue_id: i64) -> Vec<QueueEntry> {
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("查询 queue_entries 失败：{e}");
+            log::error!("查询 queue_entries 失败：{e}");
             return vec![];
         }
     };
@@ -1508,7 +1508,7 @@ fn load_queue_entries(conn: &Connection, queue_id: i64) -> Vec<QueueEntry> {
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
     .unwrap_or_else(|e| {
-        eprintln!("读取 queue_entries 失败：{e}");
+        log::error!("读取 queue_entries 失败：{e}");
         vec![]
     })
 }
@@ -1703,7 +1703,7 @@ fn load_variables(conn: &Connection, overlay_id: i64) -> Vec<UserVar> {
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("查询 variables 失败：{e}");
+            log::error!("查询 variables 失败：{e}");
             return vec![];
         }
     };
@@ -1720,7 +1720,7 @@ fn load_variables(conn: &Connection, overlay_id: i64) -> Vec<UserVar> {
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
     .unwrap_or_else(|e| {
-        eprintln!("读取 variables 失败：{e}");
+        log::error!("读取 variables 失败：{e}");
         vec![]
     })
 }
@@ -1732,7 +1732,7 @@ fn load_computed(conn: &Connection, overlay_id: i64) -> Vec<ComputedVar> {
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("查询 computed 失败：{e}");
+            log::error!("查询 computed 失败：{e}");
             return vec![];
         }
     };
@@ -1749,7 +1749,7 @@ fn load_computed(conn: &Connection, overlay_id: i64) -> Vec<ComputedVar> {
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
     .unwrap_or_else(|e| {
-        eprintln!("读取 computed 失败：{e}");
+        log::error!("读取 computed 失败：{e}");
         vec![]
     })
 }

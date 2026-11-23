@@ -243,6 +243,11 @@ mod imp {
         let queue_id = queue.id;
 
         // 1. 短号 → 真实房间号
+        let t0 = std::time::Instant::now();
+        log::info!(
+            "队列 #{queue_id} 房间 {}：开始连接 B 站弹幕，解析真实房间号",
+            queue.room_id
+        );
         let info = get_json(client, &format!("{ROOM_INFO_URL}{}", queue.room_id)).await?;
         let code = info.get("code").and_then(as_i64).unwrap_or(-1);
         if code != 0 {
@@ -262,6 +267,11 @@ mod imp {
             return Err("没有解析到真实房间号，请检查直播间号".into());
         }
         patch_status(app, queue_id, |s| s.real_room_id = real_room_id);
+        log::info!(
+            "队列 #{queue_id} 房间 {} → 真实房间 {real_room_id}：解析完成，耗时 {}ms",
+            queue.room_id,
+            t0.elapsed().as_millis()
+        );
 
         // 2. 弹幕服务器与 token
         let conf = get_json(client, &format!("{DANMU_CONF_URL}{real_room_id}")).await?;
@@ -295,6 +305,10 @@ mod imp {
         if hosts.is_empty() {
             hosts.push(("broadcastlv.chat.bilibili.com".into(), 443));
         }
+        log::debug!(
+            "队列 #{queue_id}：获取到 {} 个弹幕服务器",
+            hosts.len()
+        );
         // 3. 匿名弹幕也建议带 buvid，减少被风控拒绝的概率
         let buvid = fetch_buvid(client).await;
 
@@ -337,6 +351,10 @@ mod imp {
         ws.send(Message::Binary(make_packet(7, auth.to_string().as_bytes()).into()))
             .await
             .map_err(|e| format!("发送弹幕鉴权失败：{e}"))?;
+        log::info!(
+            "队列 #{queue_id}：连接 {host}:{port} 成功，已发送鉴权包，耗时 {}ms",
+            t0.elapsed().as_millis()
+        );
 
         let mut patterns = compile_patterns(&queue.patterns);
         let mut pending: Vec<(i64, String, i64)> = Vec::new();
@@ -362,6 +380,7 @@ mod imp {
                     ws.send(Message::Binary(make_packet(2, b"[object Object]").into()))
                         .await
                         .map_err(|e| format!("发送弹幕心跳失败：{e}"))?;
+                    log::debug!("队列 #{queue_id}：已发送心跳");
                 }
                 _ = flush_tick.tick() => {
                     // 规则可能刚被修改：每个刷新周期读一次最新配置
@@ -385,7 +404,7 @@ mod imp {
                                 );
                             }
                             Ok(_) => {}
-                            Err(e) => eprintln!("写入排队队列 #{queue_id} 失败：{e}"),
+                            Err(e) => log::error!("队列 #{queue_id} 写入排队队列失败：{e}"),
                         }
                     }
                 }
@@ -408,6 +427,7 @@ mod imp {
                                         s.connected = true;
                                         s.last_error.clear();
                                     });
+                                    log::info!("队列 #{queue_id} 房间 {real_room_id}：弹幕鉴权成功，开始接收消息");
                                     continue;
                                 }
                                 if op != 5 {
@@ -445,10 +465,14 @@ mod imp {
                             let _ = ws.send(Message::Pong(payload)).await;
                         }
                         Some(Ok(Message::Close(_))) => {
+                            log::warn!("队列 #{queue_id}：弹幕服务器关闭了连接");
                             return Err("弹幕服务器关闭了连接".into());
                         }
                         Some(Ok(_)) => {}
-                        Some(Err(e)) => return Err(format!("弹幕连接中断：{e}")),
+                        Some(Err(e)) => {
+                            log::warn!("队列 #{queue_id} 弹幕连接中断：{e}");
+                            return Err(format!("弹幕连接中断：{e}"));
+                        }
                         None => return Err("弹幕连接已断开".into()),
                     }
                 }

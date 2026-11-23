@@ -64,6 +64,23 @@ pub fn run() {
             }
         }));
     }
+    // 日志插件：dev 终端 + WebView 控制台 + 日志文件三路输出，带级别过滤。
+    // 必须在 setup 前注册：插件在 setup 阶段注册全局 log logger，
+    // 业务代码必须用 log::{info,warn,error}!（tracing! 宏没有 subscriber 会被丢弃）。
+    builder = builder.plugin(
+        tauri_plugin_log::Builder::new()
+            .level(log::LevelFilter::Info)
+            // 显式声明三路目标：终端 stdout / WebView 控制台 / 日志文件。
+            // WebView 目标默认不启用，不加的话前端 console 不会进日志。
+            .targets([
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: None,
+                }),
+            ])
+            .build(),
+    );
 
     builder
         .setup(|app| {
@@ -103,12 +120,12 @@ pub fn run() {
             //    （保持隐藏，等页面量好尺寸再显示）
             for cfg in &config.overlays {
                 if let Err(e) = overlay_win::create_overlay_window(app.handle(), cfg) {
-                    eprintln!("启动浮窗 #{} 失败：{e}", cfg.id);
+                    log::error!("启动浮窗 #{} 失败：{e}", cfg.id);
                 }
             }
             for cfg in &config.queues {
                 if let Err(e) = queue_win::create_queue_window(app.handle(), cfg) {
-                    eprintln!("启动排队弹窗 #{} 失败：{e}", cfg.id);
+                    log::error!("启动排队弹窗 #{} 失败：{e}", cfg.id);
                 }
             }
 
@@ -118,6 +135,7 @@ pub fn run() {
             // 5. 托盘
             tray::create_tray(app.handle())?;
 
+            log::info!("应用启动完成，日志系统就绪");
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -172,7 +172,7 @@ pub fn sync_all_overlay_windows(app: &AppHandle) {
     for cfg in store.get().overlays {
         if let Some(window) = app.get_webview_window(&overlay_label(cfg.id)) {
             if let Err(e) = apply_window_state(app, &window, &cfg, false) {
-                eprintln!("同步浮窗 #{} 失败：{e}", cfg.id);
+                log::error!("同步浮窗 #{} 失败：{e}", cfg.id);
             }
         }
     }

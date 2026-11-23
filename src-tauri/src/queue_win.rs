@@ -148,7 +148,7 @@ pub fn sync_all_queue_windows(app: &AppHandle) {
     for cfg in store.get().queues {
         if let Some(window) = app.get_webview_window(&queue_label(cfg.id)) {
             if let Err(e) = apply_queue_window_state(app, &window, &cfg, false) {
-                eprintln!("同步排队弹窗 #{} 失败：{e}", cfg.id);
+                log::error!("同步排队弹窗 #{} 失败：{e}", cfg.id);
             }
         }
     }

@@ -21,7 +21,7 @@ pub const CONFIG_CHANGED_EVENT: &str = "config-changed";
 
 fn broadcast(app: &AppHandle, config: &Config) {
     if let Err(e) = app.emit(CONFIG_CHANGED_EVENT, config) {
-        eprintln!("广播配置失败：{e}");
+        log::error!("广播配置失败：{e}");
     }
 }
 
