@@ -10,11 +10,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppConfig,
+  BackupPreview,
   ComputedVar,
+  ImportResult,
+  LogLevel,
   OverlayConfig,
   QueueConfig,
   QueueStatus,
+  SettingsInfo,
+  ThemeMode,
   UserVar,
+  WebdavConfig,
 } from "./types";
 
 type ConfigListener = (c: AppConfig) => void;
@@ -173,6 +179,45 @@ export const clearQueueEntries = (queueId: number) =>
 
 /** 主窗口定时查询各队列的弹幕连接状态 */
 export const getQueueStatus = () => invoke<QueueStatus[]>("get_queue_status");
+
+// ---------- 设置 / 备份同步 ----------
+
+/** 读取应用设置（conf.toml：外观、日志等级、路径） */
+export const getSettings = () => invoke<SettingsInfo>("get_settings");
+
+/** 保存外观（auto / light / dark），立即写入 conf.toml */
+export const saveTheme = (theme: ThemeMode) =>
+  invoke<SettingsInfo>("set_theme", { theme });
+
+/** 保存日志等级，立即生效并写入 conf.toml */
+export const saveLogLevel = (level: LogLevel) =>
+  invoke<SettingsInfo>("set_log_level", { level });
+
+/** 恢复默认设置（外观 auto + 日志 error；不影响 SQLite 数据） */
+export const resetSettings = () => invoke<SettingsInfo>("reset_settings");
+
+/** 导出到本地路径（includeData=false 时只导出 conf.toml） */
+export const exportLocal = (path: string, includeData: boolean) =>
+  invoke<string>("export_local", { path, includeData });
+
+/** 导出到 WebDAV（includeData=false 时上传 conf.toml，否则上传 JSON 备份） */
+export const exportWebdav = (dav: WebdavConfig, includeData: boolean) =>
+  invoke<string>("export_webdav", { dav, includeData });
+
+/** 读取本地备份并暂存，返回摘要；真正导入走 applyBackup */
+export const selectLocalBackup = (path: string) =>
+  invoke<BackupPreview>("select_local_backup", { path });
+
+/** 从 WebDAV 下载备份并暂存，返回摘要 */
+export const selectWebdavBackup = (dav: WebdavConfig, remoteFile: string) =>
+  invoke<BackupPreview>("select_webdav_backup", { dav, remoteFile });
+
+/** 应用已暂存的备份：覆盖或增量；applySettings 控制是否导入外观/日志等级 */
+export const applyBackup = (mode: "overwrite" | "merge", applySettings: boolean) =>
+  invoke<ImportResult>("apply_backup", { mode, applySettings }).then((result) => {
+    publish(result.config);
+    return result;
+  });
 
 // ---------- 杂项 ----------
 

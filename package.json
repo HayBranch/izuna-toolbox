@@ -1,7 +1,7 @@
 {
   "name": "izuna-toolbox",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "泉奈工具箱 —— 带 OBS 可捕获悬浮字幕的轻量 Tauri 桌面工具",
   "type": "module",
   "scripts": {
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-log": "^2.10.2",
     "react": "^19",
     "react-dom": "^19"

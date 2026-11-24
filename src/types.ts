@@ -142,6 +142,63 @@ export interface AppConfig {
   queues: QueueConfig[];
 }
 
+/** 界面外观（保存在 conf/conf.toml，不再使用 localStorage） */
+export type ThemeMode = "auto" | "light" | "dark";
+
+/** 日志等级（conf/conf.toml → log_level；默认 error，基本不打印日志） */
+export type LogLevel = "off" | "error" | "warn" | "info" | "debug" | "trace";
+
+/** 应用设置（Rust 侧 conf.toml，设置页读写） */
+export interface SettingsInfo {
+  portable: boolean;
+  theme: ThemeMode;
+  logLevel: LogLevel;
+  /** conf/conf.toml 的完整路径 */
+  confPath: string;
+  /** 日志目录（exe 同目录 logs/） */
+  logDir: string;
+}
+
+/** WebDAV 连接信息（只保存在 WebView localStorage，不写 conf.toml） */
+export interface WebdavConfig {
+  baseUrl: string;
+  username: string;
+  password: string;
+  remoteDir: string;
+}
+
+/** 导入前预览：只给摘要，不把整份名单传回前端 */
+export interface BackupPreview {
+  source: string;
+  exportedAt: number;
+  appVersion: string;
+  hasSettings: boolean;
+  theme: string | null;
+  logLevel: string | null;
+  hasData: boolean;
+  overlayCount: number;
+  queueCount: number;
+  entryCount: number;
+}
+
+/** 增量导入统计 */
+export interface ImportStats {
+  overlaysAdded: number;
+  overlaysSkipped: number;
+  queuesAdded: number;
+  queuesMerged: number;
+  entriesAdded: number;
+  entriesMerged: number;
+}
+
+/** 导入结果：最新设置 + 最新配置 + 统计 */
+export interface ImportResult {
+  settings: SettingsInfo;
+  config: AppConfig;
+  stats: ImportStats;
+  mode: "overwrite" | "merge";
+}
+
 /** 拖动浮窗 / 排队弹窗时 Rust 发出的事件负载 */
 export interface MovedEvent {
   id: number;

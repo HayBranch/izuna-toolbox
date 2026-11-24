@@ -25,6 +25,8 @@ rusqlite = { version = "0.42", default-features = false, features = ["bundled"] 
 tauri-plugin-single-instance = "2"
 # 日志系统：tauri-plugin-log 注册全局 log logger，终端 + WebView 控制台 + 日志文件三路输出
 tauri-plugin-log = "2"
+# 系统文件选择 / 另存对话框（设置页导出、导入备份）
+tauri-plugin-dialog = "2"
 log = "0.4"
 # 启动配置 conf/conf.toml（便携模式 + 日志等级）
 toml = "0.8"

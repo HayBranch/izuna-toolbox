@@ -11,13 +11,16 @@
 //! B 站弹幕由 `danmaku` 模块的长连接任务实时接收，按队列配置的间隔批量写入。
 
 mod app_config;
+mod backup;
 mod commands;
 mod danmaku;
 mod overlay_win;
 mod queue_win;
+mod settings_cmd;
 mod store;
 mod tray;
 mod updater;
+mod webdav;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,11 +65,11 @@ pub fn run() {
         }));
     }
     // 日志插件：dev 终端 + WebView 控制台 + exe 同目录 logs/ 三路输出。
-    // 等级来自 conf/conf.toml；必须在 setup 前注册，插件会在 setup 阶段
-    // 注册全局 log logger，业务代码一律用 log::{info,warn,error}!。
+    // 插件内部先按 Trace 接收全部记录，真正的过滤等级由 `log::set_max_level`
+    // 在 setup 里按 conf.toml 设置；这样设置页改日志等级可以立即生效，无需重启。
     builder = builder.plugin(
         tauri_plugin_log::Builder::new()
-            .level(loaded.log_level)
+            .level(log::LevelFilter::Trace)
             .targets([
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
@@ -77,9 +80,14 @@ pub fn run() {
             ])
             .build(),
     );
+    // 系统文件选择 / 另存对话框（导出、导入备份用）
+    builder = builder.plugin(tauri_plugin_dialog::init());
 
     builder
         .setup(move |app| {
+            // 恢复 conf.toml 里保存的日志等级（默认 error：基本不打印日志）。
+            log::set_max_level(loaded.log_level);
+
             // logger 已就绪，补记启动配置阶段的提示。
             for warning in &loaded.warnings {
                 log::warn!("{warning}");
@@ -88,7 +96,7 @@ pub fn run() {
             // 1. 数据存储仍是 SQLite；便携模式由 conf/conf.toml 决定：
             //    true  → exe 同目录 data/（整包可拷走）
             //    false → 系统应用数据目录 %APPDATA%/com.izuna.toolbox/
-            let data_dir = if loaded.portable {
+            let data_dir = if loaded.settings.portable {
                 exe_dir.join(app_config::DATA_DIR)
             } else {
                 app.path().app_data_dir()?
@@ -105,6 +113,10 @@ pub fn run() {
             //    浮窗页面一加载就会调用 get_config；若 store 到窗口创建之后才 manage，
             //    启动瞬间会报 "state not managed for field store on command get_config"。
             app.manage(store.clone());
+            // 应用设置（外观 / 日志等级）与待导入备份：设置页与导入命令共用。
+            // 必须在任何窗口创建前注册，否则页面首次 get_settings 会报 state not managed。
+            app.manage(app_config::SettingsState::new(loaded.settings.clone()));
+            app.manage(backup::PendingBackup::default());
             app.manage(overlay_win::MeasuredSet(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )));
@@ -238,6 +250,15 @@ pub fn run() {
             commands::get_queue_status,
             commands::set_main_always_on_top,
             commands::open_url,
+            settings_cmd::get_settings,
+            settings_cmd::set_theme,
+            settings_cmd::set_log_level,
+            settings_cmd::reset_settings,
+            settings_cmd::export_local,
+            settings_cmd::export_webdav,
+            settings_cmd::select_local_backup,
+            settings_cmd::select_webdav_backup,
+            settings_cmd::apply_backup,
             updater::download_update,
             updater::cancel_update,
             updater::install_update,

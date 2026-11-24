@@ -9,15 +9,16 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
-import { getConfig, openUrl, setMainAlwaysOnTop, subscribeConfig } from "./api";
+import { getConfig, getSettings, setMainAlwaysOnTop, subscribeConfig } from "./api";
 import izunaIcon from "./assets/izuna-icon.png";
 import OverlayWindow from "./components/OverlayWindow";
 import OverlaysPage from "./components/OverlaysPage";
 import QueuesPage from "./components/QueuesPage";
 import QueueWindow from "./components/QueueWindow";
+import SettingsPage from "./components/SettingsPage";
 import UpdateDialog from "./components/UpdateDialog";
-import { applyThemeMode, getThemeMode, setThemeMode, type ThemeMode } from "./theme";
-import type { AppConfig, MovedEvent } from "./types";
+import { applyThemeMode, type ThemeMode } from "./theme";
+import type { AppConfig, MovedEvent, SettingsInfo } from "./types";
 import { checkForUpdate, markChecked, shouldStartupCheck, type UpdateInfo } from "./updater";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
@@ -51,24 +52,39 @@ export default function App() {
   return <MainShell />;
 }
 
-type MainPage = "overlays" | "queues";
+type MainPage = "overlays" | "queues" | "settings";
 
 function MainShell() {
   const [page, setPage] = useState<MainPage>("overlays");
-  const [aboutOpen, setAboutOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<SettingsInfo | null>(null);
   const [pinned, setPinned] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateToast, setUpdateToast] = useState<UpdateInfo | null>(null);
   const [version, setVersion] = useState("");
-  const [themeMode, setThemeModeState] = useState<ThemeMode>(getThemeMode);
+  const [themeMode, setThemeModeState] = useState<ThemeMode>("auto");
 
-  // 左上角显示当前版本号（与「关于」弹窗同源：Tauri 运行时版本，构建期注入兜底）
+  // 左上角显示当前版本号（与「关于」页面同源：Tauri 运行时版本，构建期注入兜底）
   useEffect(() => {
     getVersion()
       .then(setVersion)
       .catch(() => setVersion(__APP_VERSION__));
+  }, []);
+
+  // 外观偏好保存在 conf/conf.toml：启动时读取一次，之后由设置页命令写回。
+  useEffect(() => {
+    let alive = true;
+    getSettings()
+      .then((s) => {
+        if (!alive) return;
+        setSettings(s);
+        setThemeModeState(s.theme);
+      })
+      .catch((e) => console.warn("读取应用设置失败", e));
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // 主题：切换模式立即生效；auto 模式跟随系统外观（监听变化实时同步）。
@@ -86,11 +102,6 @@ function MainShell() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, [themeMode]);
-
-  const chooseTheme = (mode: ThemeMode) => {
-    setThemeModeState(mode);
-    setThemeMode(mode);
-  };
 
   // 重开应用时恢复上次的「主窗口置顶」选择
   useEffect(() => {
@@ -224,7 +235,7 @@ function MainShell() {
 
   return (
     <div className="flex h-full">
-      {/* 侧边导航：只有一个功能，固定高亮，不需要切换 */}
+      {/* 侧边导航：悬浮字幕 / 排队队列；设置按钮在左下角 */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white/60 dark:border-slate-800/80 dark:bg-slate-900/60">
         <div className="flex items-center gap-3 px-5 pt-6 pb-5">
           <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-white shadow-lg shadow-indigo-500/20 ring-1 ring-slate-200 dark:bg-slate-950 dark:ring-slate-700/70">
@@ -257,7 +268,6 @@ function MainShell() {
         </nav>
 
         <footer className="mt-auto space-y-3 px-5 pb-5 text-xs leading-5 text-slate-500 dark:text-slate-600">
-          <ThemeSwitcher mode={themeMode} onChoose={chooseTheme} />
           <p>
             关闭窗口不会退出，
             <br />
@@ -266,6 +276,20 @@ function MainShell() {
             浮窗继续悬浮，可被直播软件捕获。
           </p>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage("settings")}
+              aria-current={page === "settings" ? "page" : undefined}
+              title="外观、开发者选项、配置同步与关于"
+              className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${
+                page === "settings"
+                  ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
+                  : "border-slate-200 text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-800 dark:text-slate-500 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+              }`}
+            >
+              <GearIcon />
+              设置
+            </button>
             <button
               type="button"
               onClick={() => void togglePinned()}
@@ -280,30 +304,33 @@ function MainShell() {
               <PinIcon filled={pinned} />
               {pinned ? "已置顶" : "置顶窗口"}
             </button>
-            <button
-              onClick={() => setAboutOpen(true)}
-              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:border-slate-600 dark:hover:text-slate-300"
-            >
-              ℹ️ 关于
-            </button>
           </div>
         </footer>
       </aside>
 
-      {/* 内容区：按左侧导航切换「悬浮字幕 / 排队队列」 */}
+      {/* 内容区：按左侧导航切换「悬浮字幕 / 排队队列 / 设置」 */}
       <main className="min-w-0 flex-1 overflow-y-auto p-8">
         <header className="mb-6">
           <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
-            {page === "overlays" ? "悬浮字幕" : "排队队列"}
+            {page === "overlays" ? "悬浮字幕" : page === "queues" ? "排队队列" : "设置"}
           </h2>
           <p className="mt-1 text-sm text-slate-500">
             {page === "overlays"
               ? "可被 OBS 等直播软件捕获的悬浮字幕：多套浮窗各自独立（变量、模板、样式）。先在列表里看基本信息，点进去配置详情。"
-              : "接入 B 站直播弹幕，按正则把「排队」等弹幕记成名单：每个队列独立直播间、规则、排序与透明弹窗。"}
+              : page === "queues"
+                ? "接入 B 站直播弹幕，按正则把「排队」等弹幕记成名单：每个队列独立直播间、规则、排序与透明弹窗。"
+                : "外观、开发者选项、配置及同步，以及关于信息。修改会立即保存到 exe 同目录的 conf/conf.toml。"}
           </p>
         </header>
 
-        {!config ? (
+        {page === "settings" ? (
+          <SettingsPage
+            settings={settings}
+            onSettings={setSettings}
+            onThemeModeChange={setThemeModeState}
+            onCheckUpdate={() => setUpdateOpen(true)}
+          />
+        ) : !config ? (
           configError ? (
             <div className="rounded-xl border border-rose-500/30 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-950 dark:text-rose-300" role="alert">
               <p className="font-medium">加载配置失败</p>
@@ -326,15 +353,6 @@ function MainShell() {
         )}
       </main>
 
-      {aboutOpen && (
-        <AboutDialog
-          onClose={() => setAboutOpen(false)}
-          onCheckUpdate={() => {
-            setAboutOpen(false);
-            setUpdateOpen(true);
-          }}
-        />
-      )}
       {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
 
       {updateToast && (
@@ -391,47 +409,22 @@ function NavItem({
   );
 }
 
-/** 左下角主题切换：自动（跟随系统）/ 白 / 黑 三段选择 */
-function ThemeSwitcher({ mode, onChoose }: { mode: ThemeMode; onChoose: (m: ThemeMode) => void }) {
-  const options: Array<{ value: ThemeMode; icon: string; label: string }> = [
-    { value: "auto", icon: "🖥", label: "自动" },
-    { value: "light", icon: "☀️", label: "白" },
-    { value: "dark", icon: "🌙", label: "黑" },
-  ];
+/** 左下角设置按钮的齿轮图标（内联 SVG，避免额外图标库） */
+function GearIcon() {
   return (
-    <div className="space-y-1.5">
-      <p className="text-[11px] text-slate-400 dark:text-slate-600">主题</p>
-      <div
-        role="radiogroup"
-        aria-label="界面主题"
-        className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white/70 p-1 dark:border-slate-800 dark:bg-slate-900/60"
-      >
-        {options.map((o) => (
-          <button
-            key={o.value}
-            type="button"
-            role="radio"
-            aria-checked={mode === o.value}
-            onClick={() => onChoose(o.value)}
-            title={
-              o.value === "auto"
-                ? "自动：跟随系统深浅色外观"
-                : o.value === "light"
-                  ? "白色（亮色）主题"
-                  : "黑色（暗色）主题"
-            }
-            className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-1.5 py-1 text-xs transition ${
-              mode === o.value
-                ? "bg-indigo-500 font-medium text-white"
-                : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-            }`}
-          >
-            <span aria-hidden="true">{o.icon}</span>
-            {o.label}
-          </button>
-        ))}
-      </div>
-    </div>
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.36.7.64.96.3.27.68.42 1.08.44H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5.6Z" />
+    </svg>
   );
 }
 
@@ -451,91 +444,5 @@ function PinIcon({ filled }: { filled: boolean }) {
       <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6Z" />
       <path d="M12 14v7" />
     </svg>
-  );
-}
-
-/** 「关于」弹窗：应用介绍、版本、仓库与开源协议 */
-function AboutDialog({
-  onClose,
-  onCheckUpdate,
-}: {
-  onClose: () => void;
-  onCheckUpdate: () => void;
-}) {
-  const [version, setVersion] = useState("");
-  useEffect(() => {
-    getVersion()
-      .then(setVersion)
-      .catch(() => setVersion(__APP_VERSION__));
-  }, []);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-white shadow-lg shadow-indigo-500/20 ring-1 ring-slate-200 dark:bg-slate-950 dark:ring-slate-700/70">
-            <img
-              src={izunaIcon}
-              alt="泉奈工具箱图标"
-              draggable={false}
-              className="h-full w-full object-cover"
-            />
-          </div>
-          <div>
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">泉奈工具箱</h3>
-            <p className="text-xs text-slate-500">Izuna Toolbox{version ? ` · v${version}` : ""}</p>
-          </div>
-        </div>
-
-        <p className="mt-4 text-sm leading-6 text-slate-500 dark:text-slate-400">
-          为直播玩家打造的本地小工具：把战绩数据做成一枚可被 OBS
-          等直播软件捕获的悬浮字幕浮窗，还能接入 B 站直播弹幕、按正则自动统计排队名单并显示在独立弹窗里。
-          支持多套浮窗（各自独立的变量与模板）、多套排队队列（各自直播间/规则/排序）、
-          自定义变量与表达式计算、百分比格式化、多行换行排版；数据全部保存在本地
-          SQLite、不会上传，仅「检查更新」会连接 GitHub，排队队列会连接 B 站获取公开弹幕。
-        </p>
-
-        <div className="mt-4 space-y-1.5 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-5 dark:border-slate-800 dark:bg-slate-950/60">
-          <p className="text-slate-500">
-            仓库：{" "}
-            <button
-              type="button"
-              onClick={() => openUrl("https://github.com/HayBranch/izuna-toolbox").catch(console.warn)}
-              title="在浏览器中打开仓库"
-              className="break-all font-mono text-sky-600 underline decoration-sky-500/40 underline-offset-2 transition hover:text-sky-700 hover:decoration-sky-500 dark:text-sky-400 dark:hover:text-sky-300"
-            >
-              https://github.com/HayBranch/izuna-toolbox
-            </button>
-          </p>
-          <p className="text-slate-500">
-            协议：<span className="text-slate-600 dark:text-slate-400">MIT License</span>
-          </p>
-          <p className="text-slate-500">
-            版权：<span className="text-slate-600 dark:text-slate-400">Copyright © 2026 HayBranch</span>
-          </p>
-        </div>
-
-        <div className="mt-5 flex gap-2">
-          <button
-            onClick={onCheckUpdate}
-            className="flex-1 rounded-xl border border-slate-300 bg-white/70 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
-          >
-            检查更新
-          </button>
-          <button
-            onClick={onClose}
-            className="flex-1 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-400"
-          >
-            关闭
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }

@@ -11,6 +11,8 @@
     "core:window:allow-inner-size",
     "core:window:allow-scale-factor",
     "core:window:allow-set-theme",
-    "log:default"
+    "log:default",
+    "dialog:default",
+    "dialog:allow-ask"
   ]
 }

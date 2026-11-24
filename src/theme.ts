@@ -1,25 +1,15 @@
 /**
  * 界面主题（主窗口）：auto 跟随系统 / light 亮色 / dark 暗色。
  *
- * 实现方式：往 <html> 上增删 `dark` 类，Tailwind 的 `dark:` 变体（见 index.css
- * 的 @custom-variant）据此生效。偏好存 localStorage，与「窗口置顶」等惯例一致。
- * main.tsx 在渲染前先应用一次，避免启动瞬间闪一下错误配色的白屏。
+ * 偏好现在保存在 exe 同目录 `conf/conf.toml` 的 `theme` 项（由 Rust 设置命令读写），
+ * 不再使用 WebView localStorage。这里只负责把模式解析成 <html> 上的 `dark` 类，
+ * Tailwind 的 `dark:` 变体（见 index.css 的 @custom-variant）据此生效。
+ * main.tsx 在渲染前先按系统外观应用一次，避免启动瞬间闪一下错误配色。
  */
 
-export type ThemeMode = "auto" | "light" | "dark";
+import type { ThemeMode } from "./types";
 
-const THEME_KEY = "izuna.theme";
-
-export function getThemeMode(): ThemeMode {
-  const v = localStorage.getItem(THEME_KEY);
-  return v === "light" || v === "dark" ? v : "auto";
-}
-
-/** 记住用户选择（auto/light/dark）并立即应用，切换按钮无需等 React 重渲染。 */
-export function setThemeMode(mode: ThemeMode): void {
-  localStorage.setItem(THEME_KEY, mode);
-  applyThemeMode(mode);
-}
+export type { ThemeMode } from "./types";
 
 /** 系统当前是否深色外观。 */
 export function prefersDark(): boolean {
@@ -27,7 +17,7 @@ export function prefersDark(): boolean {
 }
 
 /** 按模式解析出「实际是否深色」并同步到 <html>，返回结果。 */
-export function applyThemeMode(mode: ThemeMode = getThemeMode()): boolean {
+export function applyThemeMode(mode: ThemeMode = "auto"): boolean {
   const dark = mode === "dark" || (mode === "auto" && prefersDark());
   document.documentElement.classList.toggle("dark", dark);
   return dark;

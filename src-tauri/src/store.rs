@@ -13,6 +13,7 @@
 //! 并发模型：`Connection` 非 `Sync`，用 `Mutex` 包一层挂进 Tauri 状态。
 //! 每次变更返回最新全量 `Config`，由命令层广播给所有窗口（单一数据源）。
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -200,6 +201,18 @@ impl Default for QueueConfig {
 pub struct Config {
     pub overlays: Vec<OverlayConfig>,
     pub queues: Vec<QueueConfig>,
+}
+
+/// 导入备份后的统计（「增量」模式下会跳过同名浮窗、合并同名队列名单）。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStats {
+    pub overlays_added: usize,
+    pub overlays_skipped: usize,
+    pub queues_added: usize,
+    pub queues_merged: usize,
+    pub entries_added: usize,
+    pub entries_merged: usize,
 }
 
 // ---------- 空库 / 新浮窗的默认数据（要改初始配置，只改这一段） ----------
@@ -1390,6 +1403,258 @@ impl Store {
         tx.commit().map_err(|e| e.to_string())?;
         Ok(changed)
     }
+
+    // ---------- 备份导入 ----------
+
+    /// 覆盖导入：清空现有浮窗/变量/计算变量/队列/名单，再按备份重建。
+    /// 所有记录都重新分配 id，避免备份里的旧 id 与库内其它数据撞车。
+    pub fn replace_all(&self, config: &Config) -> Result<ImportStats, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM variables", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM computed", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM queue_entries", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM overlays", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM queues", [])
+            .map_err(|e| e.to_string())?;
+
+        let mut stats = ImportStats::default();
+        let mut overlay_id = next_id(&tx, "overlays")?;
+        for cfg in &config.overlays {
+            insert_overlay_full(&tx, cfg, overlay_id)?;
+            overlay_id += 1;
+            stats.overlays_added += 1;
+        }
+        let mut queue_id = next_id(&tx, "queues")?;
+        for cfg in &config.queues {
+            insert_queue_full(&tx, cfg, queue_id)?;
+            queue_id += 1;
+            stats.queues_added += 1;
+            stats.entries_added += cfg.entries.len();
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(stats)
+    }
+
+    /// 增量导入：保留现有数据，只新增本地没有的同名浮窗 / 队列。
+    /// - 同名浮窗：跳过（不覆盖现有配置）；
+    /// - 同名队列：把备份名单合并进去（同 UID 次数取较大值，时间取并集）；
+    /// - 新队列：整条新增，名单一并导入。
+    pub fn merge_from(&self, config: &Config) -> Result<ImportStats, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut stats = ImportStats::default();
+
+        // 现有浮窗名（去首尾空白）→ 同名视为同一套，增量模式不覆盖
+        let mut overlay_names: HashSet<String> = {
+            let mut stmt = tx
+                .prepare("SELECT name FROM overlays")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok())
+                .map(|n| n.trim().to_string())
+                .collect()
+        };
+
+        let mut overlay_id = next_id(&tx, "overlays")?;
+        for cfg in &config.overlays {
+            let name = cfg.name.trim().to_string();
+            if name.is_empty() || overlay_names.contains(&name) {
+                stats.overlays_skipped += 1;
+                continue;
+            }
+            insert_overlay_full(&tx, cfg, overlay_id)?;
+            overlay_id += 1;
+            overlay_names.insert(name);
+            stats.overlays_added += 1;
+        }
+
+        // 现有队列名 → id，同名队列只合并名单
+        let mut queue_ids: HashMap<String, i64> = {
+            let mut stmt = tx
+                .prepare("SELECT id, name FROM queues")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok())
+                .map(|(id, name)| (name.trim().to_string(), id))
+                .collect()
+        };
+
+        let mut queue_id = next_id(&tx, "queues")?;
+        for cfg in &config.queues {
+            let name = cfg.name.trim().to_string();
+            if let Some(existing) = queue_ids.get(&name) {
+                let (added, merged) = merge_entries(&tx, *existing, &cfg.entries)?;
+                stats.entries_added += added;
+                stats.entries_merged += merged;
+                stats.queues_merged += 1;
+                continue;
+            }
+            insert_queue_full(&tx, cfg, queue_id)?;
+            queue_id += 1;
+            if !name.is_empty() {
+                queue_ids.insert(name, queue_id - 1);
+            }
+            stats.queues_added += 1;
+            stats.entries_added += cfg.entries.len();
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(stats)
+    }
+}
+
+/// 下一个可用 id：当前时间戳与现有最大 id + 1 取大（与新建浮窗/队列一致）。
+fn next_id(conn: &Connection, table: &str) -> Result<i64, String> {
+    let max: i64 = conn
+        .query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(now_ms().max(max + 1))
+}
+
+/// 写入一套浮窗及其变量/计算变量（导入共用，id 由调用方分配）。
+fn insert_overlay_full(conn: &Connection, cfg: &OverlayConfig, new_id: i64) -> Result<(), String> {
+    let mut overlay = cfg.clone();
+    overlay.id = new_id;
+    insert_overlay(conn, &overlay)?;
+
+    // 变量 id 会重新分配，联动关系要按旧 id → 新 id 映射后回填
+    let mut id_map: HashMap<i64, i64> = HashMap::new();
+    let fallback_created = now_ms();
+    for (i, v) in cfg.variables.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO variables (overlay_id, key, name, value, step, follow_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![
+                new_id,
+                v.key,
+                v.name,
+                v.value,
+                v.step,
+                if v.created_at > 0 {
+                    v.created_at
+                } else {
+                    fallback_created + i as i64
+                }
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        id_map.insert(v.id, conn.last_insert_rowid());
+    }
+    for v in &cfg.variables {
+        if v.follow_id == 0 {
+            continue;
+        }
+        let Some(new_follow) = id_map.get(&v.follow_id) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE variables SET follow_id = ?1 WHERE overlay_id = ?2 AND key = ?3",
+            params![new_follow, new_id, v.key],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    for c in &cfg.computed {
+        conn.execute(
+            "INSERT INTO computed (overlay_id, key, name, expr, format, decimals, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                new_id,
+                c.key,
+                c.name,
+                c.expr,
+                c.format,
+                c.decimals,
+                if c.created_at > 0 {
+                    c.created_at
+                } else {
+                    fallback_created
+                }
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 写入一条队列及其全部名单（导入共用）。
+fn insert_queue_full(conn: &Connection, cfg: &QueueConfig, new_id: i64) -> Result<(), String> {
+    let mut queue = cfg.clone();
+    queue.id = new_id;
+    insert_queue(conn, &queue)?;
+    merge_entries(conn, new_id, &cfg.entries)?;
+    Ok(())
+}
+
+/// 把备份名单合并进队列：同 UID 保留较大次数、时间取并集；手动成员按昵称匹配。
+/// 返回（新增条数，合并条数）。
+fn merge_entries(
+    conn: &Connection,
+    queue_id: i64,
+    entries: &[QueueEntry],
+) -> Result<(usize, usize), String> {
+    let mut added = 0usize;
+    let mut merged = 0usize;
+    for e in entries {
+        let nickname = e.nickname.trim();
+        if nickname.is_empty() {
+            continue;
+        }
+        let existing: Option<(i64, i64, i64)> = if e.uid > 0 {
+            conn.query_row(
+                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = ?2",
+                params![queue_id, e.uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?
+        } else {
+            conn.query_row(
+                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = 0 AND nickname = ?2",
+                params![queue_id, nickname],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?
+        };
+        let first_at = if e.first_at > 0 { e.first_at } else { now_ms() };
+        let last_at = if e.last_at > 0 { e.last_at } else { first_at };
+        if let Some((id, _, _)) = existing {
+            conn.execute(
+                "UPDATE queue_entries SET count = MAX(count, ?1), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3) WHERE id = ?4",
+                params![e.count.max(1), first_at, last_at, id],
+            )
+            .map_err(|err| err.to_string())?;
+            merged += 1;
+        } else {
+            conn.execute(
+                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    queue_id,
+                    e.uid.max(0),
+                    nickname,
+                    e.count.max(1),
+                    first_at,
+                    last_at
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+            added += 1;
+        }
+    }
+    Ok((added, merged))
 }
 
 /// 写入一条浮窗记录（新浮窗与空库初始化共用）。
@@ -1885,6 +2150,94 @@ mod tests {
         store.step_variable(1, var(&store, target).id, 1.0).unwrap();
         assert_eq!(var(&store, target).value, target_before + 1.0);
         assert_eq!(var(&store, follower.key).value, follower_before + 1.0);
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn replace_all_rebuilds_overlays_and_queues() {
+        let (store, dir) = test_store();
+        let mut snapshot = store.get();
+        snapshot.overlays[0].name = "导入浮窗".into();
+        snapshot.overlays[0].variables[0].value = 12.0;
+        let qid = store.next_queue_id();
+        let mut queue = default_queue(qid, now_ms());
+        queue.name = "导入队列".into();
+        queue.entries = vec![QueueEntry {
+            uid: 1001,
+            nickname: "阿一".into(),
+            count: 3,
+            first_at: now_ms(),
+            last_at: now_ms(),
+            ..Default::default()
+        }];
+        snapshot.queues.push(queue);
+
+        let stats = store.replace_all(&snapshot).unwrap();
+        assert_eq!(stats.overlays_added, 1);
+        assert_eq!(stats.queues_added, 1);
+
+        let after = store.get();
+        assert_eq!(after.overlays.len(), 1);
+        assert_eq!(after.overlays[0].name, "导入浮窗");
+        assert_eq!(after.overlays[0].variables[0].value, 12.0);
+        assert_eq!(after.queues.len(), 1);
+        assert_eq!(after.queues[0].entries.len(), 1);
+        cleanup(store, dir);
+    }
+
+    #[test]
+    fn merge_from_skips_same_overlay_and_merges_queue_entries() {
+        let (store, dir) = test_store();
+        let existing_name = store.get().overlays[0].name.clone();
+
+        let qid = store.next_queue_id();
+        let mut queue = default_queue(qid, now_ms());
+        queue.name = "直播排队".into();
+        store.push_queue(&queue).unwrap();
+        store
+            .record_queue_matches(qid, &[(1001, "阿一".into(), now_ms())])
+            .unwrap();
+
+        let mut backup_overlay = store.get().overlays[0].clone();
+        backup_overlay.name = existing_name;
+        let mut backup_queue = queue.clone();
+        backup_queue.entries = vec![
+            QueueEntry {
+                uid: 1001,
+                nickname: "阿一".into(),
+                count: 5,
+                first_at: 0,
+                last_at: 0,
+                ..Default::default()
+            },
+            QueueEntry {
+                uid: 1002,
+                nickname: "阿二".into(),
+                count: 2,
+                first_at: 0,
+                last_at: 0,
+                ..Default::default()
+            },
+        ];
+        let backup = Config {
+            overlays: vec![backup_overlay],
+            queues: vec![backup_queue],
+        };
+
+        let stats = store.merge_from(&backup).unwrap();
+        assert_eq!(stats.overlays_added, 0);
+        assert_eq!(stats.overlays_skipped, 1);
+        assert_eq!(stats.queues_merged, 1);
+        assert_eq!(stats.entries_merged, 1);
+        assert_eq!(stats.entries_added, 1);
+
+        let after = store.get();
+        assert_eq!(after.overlays.len(), 1);
+        assert_eq!(after.queues.len(), 1);
+        let merged = after.queues.iter().find(|q| q.name == "直播排队").unwrap();
+        let one = merged.entries.iter().find(|e| e.uid == 1001).unwrap();
+        assert_eq!(one.count, 5);
+        assert!(merged.entries.iter().any(|e| e.uid == 1002 && e.count == 2));
         cleanup(store, dir);
     }
 
