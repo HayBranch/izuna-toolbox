@@ -80,6 +80,8 @@ pub fn run() {
     builder = builder.plugin(
         tauri_plugin_log::Builder::new()
             .level(log::LevelFilter::Trace)
+            // 插件默认用 UTC，导致日志时间比北京时间慢 8 小时；显式改用本地时区。
+            .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
             .targets([
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
