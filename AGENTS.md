@@ -19,6 +19,7 @@ npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；
 
 - 仓库里**没有测试、lint、格式化配置**。`npm run build` 会跑 `tsc`（严格模式，`noUnusedLocals`/`noUnusedParameters`），是唯一的类型检查关卡。
 - Vite 开发服务器固定在 **1420** 端口（`strictPort`）——该端口必须空闲，`tauri.conf.json` 的 `devUrl` 依赖它。`clearScreen: false` 是有意为之，便于看到 Rust 编译错误；不要改动。
+- **验证时不要自建临时编译目录。** 若用户的 `npm run tauri dev` / `cargo run` 正占着 `target/` 导致 `cargo check` 报「拒绝访问 / `.cargo-build-lock`」，直接让用户停掉服务再验证，**绝不**设置 `CARGO_TARGET_DIR=target-check` 之类另起炉灶（会生成数百 MB / 数千文件，清理还需批量确认）。等用户确认服务已停，用默认 `target/` 验证即可。
 
 ## 版本号
 
