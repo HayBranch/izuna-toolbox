@@ -78,7 +78,7 @@ export interface OverlayConfig {
 /** 排队队列里的一个成员：同一 uid 累计发送次数 */
 export interface QueueEntry {
   id: number;
-  /** B 站 uid；0 表示主窗口手动添加 */
+  /** B 站 uid：>0 真实 UID；<0 游客弹幕按昵称生成的虚拟 UID；0 主窗口手动添加 */
   uid: number;
   nickname: string;
   /** 匹配到的弹幕条数 */

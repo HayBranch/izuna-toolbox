@@ -629,11 +629,19 @@ mod imp {
                                     last_message_written = now;
                                     patch_status(app, queue_id, |s| s.last_message_at = now);
                                 }
-                                if uid <= 0 || nickname.trim().is_empty() {
+                                if nickname.trim().is_empty() {
                                     log::info!(
-                                        "[弹幕] queue_id={queue_id} room={real_room_id} 跳过：UID 或昵称为空（uid={uid} 昵称={nickname:?}）"
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 跳过：昵称为空（uid={uid} 内容={text:?}）"
                                     );
                                     continue;
+                                }
+                                // B 站游客弹幕 uid=0：按昵称生成负数虚拟 UID 正常计数，
+                                // 不再当成无效弹幕丢掉（这是"发几次后不 +1"的直接原因）。
+                                let identity = if uid > 0 { uid } else { virtual_uid(&nickname) };
+                                if uid <= 0 {
+                                    log::info!(
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 游客弹幕（uid=0），按昵称生成虚拟 UID={identity}：昵称={nickname:?}"
+                                    );
                                 }
                                 let hit = patterns.iter().position(|re| re.is_match(&text));
                                 let Some(rule_idx) = hit else {
@@ -646,20 +654,20 @@ mod imp {
                                 // 去重 key 不再依赖弹幕自带时间戳：B 站部分版本该字段是秒级
                                 // 或缺失后回退成同值，手动连发相同文本会被误判重复、不再 +1。
                                 // 改用「本队列内到达流水号」保证每条到达的弹幕都能独立计数。
-                                let key = format!("{uid}:{text}:{received_danmaku}");
+                                let key = format!("{identity}:{text}:{received_danmaku}");
                                 if is_duplicate(&mut seen, key) {
                                     duplicates += 1;
                                     log::info!(
-                                        "[弹幕] queue_id={queue_id} room={real_room_id} 判定重复跳过：uid={uid} 内容={text:?}（重复数={duplicates}）"
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 判定重复跳过：identity={identity} 内容={text:?}（重复数={duplicates}）"
                                     );
                                     continue;
                                 }
                                 matched += 1;
                                 log::info!(
-                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} uid={uid} 昵称={nickname:?} 内容={text:?}，待写入={}",
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} identity={identity} 昵称={nickname:?} 内容={text:?}，待写入={}",
                                     pending.len() + 1
                                 );
-                                pending.push((uid, nickname, at));
+                                pending.push((identity, nickname, at));
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
@@ -879,6 +887,22 @@ mod imp {
             pos += total;
         }
         Ok(())
+    }
+
+    /// B 站游客/未登录弹幕的 uid 是 0、昵称被打码（如 `泉***`），
+    /// 但这是真实弹幕，不能丢。用昵称生成一个稳定的**负数**虚拟 UID：
+    /// - 负数避免和真实 UID（>0）冲突；
+    /// - 也不用 0，因为 0 被「手动添加成员」占用；
+    /// - 同一个打码昵称映射同一个值，能正常累加次数；
+    /// - FNV-1a 哈希，纯计算，跨重启稳定。
+    fn virtual_uid(nickname: &str) -> i64 {
+        let mut hash: u64 = 0xcbf29ce4_8422_2325;
+        for &b in nickname.trim().as_bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        // 取低 62 位再取负，保证结果 <= -1 且不会溢出。
+        -((hash & 0x3fff_ffff_ffff_ffff) as i64).max(1)
     }
 
     /// 从 `DANMU_MSG` 里取 (uid, 昵称, 文本, 毫秒时间戳)。

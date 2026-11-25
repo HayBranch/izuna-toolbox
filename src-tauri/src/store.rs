@@ -1369,7 +1369,10 @@ impl Store {
         let now = now_ms();
         let mut changed = 0usize;
         for (uid, nickname, at) in hits {
-            if *uid <= 0 {
+            // uid==0 是「手动添加成员」的占位值，不接受弹幕写入；
+            // 负数 uid 是弹幕层为游客（B 站返回 uid=0）按昵称生成的虚拟 UID，
+            // 必须放行，否则游客发的弹幕永远不 +1。
+            if *uid == 0 {
                 continue;
             }
             let nickname = nickname.trim();
@@ -2414,6 +2417,52 @@ mod queue_tests {
         let qb_entries = &all.iter().find(|q| q.id == id_b).unwrap().entries;
         assert_eq!(qb.id, id_b);
         assert_eq!(qb_entries.iter().find(|e| e.uid == 1001).unwrap().count, 2);
+
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：B 站游客弹幕 uid=0，弹幕层会换成负数虚拟 UID。
+    /// 写入层必须接受负数 UID 并正常累加，同时仍拒绝 uid=0 的手动占位值。
+    #[test]
+    fn guest_virtual_uid_is_recorded() {
+        let dir = std::env::temp_dir().join(format!("izuna_guest_uid_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+        let id = store.next_queue_id();
+        store.push_queue(&default_queue(id, now_ms())).unwrap();
+
+        let base = now_ms();
+        // 负数虚拟 UID（游客「泉***」）：两次应累加成一条、count=2
+        assert_eq!(
+            store
+                .record_queue_matches(id, &[(-1234567, "泉***".into(), base)])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .record_queue_matches(id, &[(-1234567, "泉***".into(), base + 1)])
+                .unwrap(),
+            1
+        );
+        // uid=0 是手动添加占位，仍拒绝
+        assert_eq!(
+            store
+                .record_queue_matches(id, &[(0, "手动添加".into(), base)])
+                .unwrap(),
+            0
+        );
+
+        let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        assert_eq!(q.entries.len(), 1);
+        let guest = q.entries.iter().find(|e| e.uid == -1234567).unwrap();
+        assert_eq!(guest.count, 2);
+        assert_eq!(guest.nickname, "泉***");
 
         drop(store);
         let _ = std::fs::remove_file(&db);

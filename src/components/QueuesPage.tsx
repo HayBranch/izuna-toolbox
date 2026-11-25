@@ -769,7 +769,7 @@ function QueueEditor({
                   className="w-40 min-w-0 rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm text-slate-800 outline-none transition hover:border-slate-300 focus:border-indigo-500 dark:text-slate-200 dark:hover:border-slate-700"
                 />
                 <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400 dark:text-slate-600">
-                  {entry.uid > 0 ? `UID ${entry.uid}` : "手动添加"} · 首次 {formatDateTime(entry.firstAt)} ·
+                  {entry.uid > 0 ? `UID ${entry.uid}` : entry.uid < 0 ? "游客" : "手动添加"} · 首次 {formatDateTime(entry.firstAt)} ·
                   最近 {formatDateTime(entry.lastAt)}
                 </span>
                 <div className="flex shrink-0 items-center gap-1.5">
