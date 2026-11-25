@@ -441,7 +441,7 @@ function DeveloperTab({
         <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
           游客连接时，B 站会把弹幕的 uid 全部改成 0、昵称打码（如 <code>泉***</code>
           ），工具无法反查真实身份。登录后服务端会下发真实 uid 与完整昵称，多个游客
-          弹幕也不再被误当成同一个人。Cookie 只存本机 <code>conf/bili_cookie.txt</code>
+          弹幕也不再被误当成同一个人。Cookie 只存本机 <code>conf/auth.toml</code>
           ，不进配置备份、不写日志。
         </p>
 
@@ -472,8 +472,9 @@ function DeveloperTab({
           />
           <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-600">
             获取方式：浏览器登录 live.bilibili.com → F12 → Network → 刷新 → 点任意一个
-            api.bilibili.com 请求 → 请求头 Request Headers 里的 Cookie 整行复制。Cookie
-            等同账号登录态，请勿外泄；过期后队列会断开，重新粘贴即可。
+            api.bilibili.com 请求 → 在请求头 Request Headers 里找到 Cookie，复制它的
+            <strong>值</strong>（带不带 <code>Cookie: </code> 前缀都能识别）。Cookie 等同
+            账号登录态，请勿外泄；过期后队列会断开，重新粘贴即可。
           </p>
         </div>
 

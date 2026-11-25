@@ -17,9 +17,11 @@ pub const CONF_DIR: &str = "conf";
 pub const CONF_FILE: &str = "conf.toml";
 pub const DATA_DIR: &str = "data";
 pub const LOGS_DIR: &str = "logs";
-/// B 站登录 Cookie 单独存，绝不写进 conf.toml：备份导出/导入只处理 conf.toml，
-/// 这样导出的配置不会把账号登录态带出去。
-pub const BILI_COOKIE_FILE: &str = "bili_cookie.txt";
+/// 本地私有凭据（B 站登录 Cookie 等）统一存这里，绝不写进 conf.toml：
+/// 备份导出/导入只处理 conf.toml，这样导出的配置不会把账号登录态带出去。
+pub const AUTH_FILE: &str = "auth.toml";
+/// 旧版单用途文件，仅用于启动时迁移到 auth.toml 后删除。
+const LEGACY_BILI_COOKIE_FILE: &str = "bili_cookie.txt";
 
 /// 旧版便携标记，仅用于在首次生成 conf.toml 时推断默认值。
 const LEGACY_PORTABLE_FLAG: &str = "portable.flag";
@@ -53,8 +55,23 @@ pub struct SettingsInfo {
     pub bili_uid: i64,
 }
 
+/// 本地私有凭据文件：conf/auth.toml 的内容。用 TOML 表结构，方便以后扩展
+/// （其它不能导出的密钥加一个表即可），与 conf.toml 的备份链路完全隔离。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct AuthFile {
+    #[serde(default)]
+    bili: Option<AuthBili>,
+}
+
+/// B 站登录态在 auth.toml 里的 [bili] 段。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct AuthBili {
+    uid: i64,
+    cookie: String,
+}
+
 /// B 站登录态：从用户粘贴的 Cookie 中解析出 uid 与可用于 WebSocket 的 Cookie 头。
-/// 只存在内存与 `conf/bili_cookie.txt`，不进 conf.toml、不写日志、不参与备份。
+/// 只存在内存与 `conf/auth.toml`，不进 conf.toml、不写日志、不参与备份。
 #[derive(Debug, Clone)]
 pub struct BiliAuth {
     /// 登录账号 uid（来自 DedeUserID）
@@ -68,7 +85,7 @@ pub struct LoadedConfig {
     pub log_level: log::LevelFilter,
     pub path: PathBuf,
     pub warnings: Vec<String>,
-    /// 启动时从 conf/bili_cookie.txt 读到的登录态（解析失败则为 None）
+    /// 启动时从 conf/auth.toml 读到的登录态（解析失败则为 None）
     pub bili_auth: Option<BiliAuth>,
 }
 
@@ -106,30 +123,36 @@ impl SettingsState {
     /// 返回的 SettingsInfo 里 bili_uid > 0 表示登录成功。
     pub fn set_bili_cookie(&self, raw: &str) -> Result<SettingsInfo, String> {
         let auth = parse_bili_cookie(raw)?;
-        let path = cookie_file_path(&self.get().conf_path)?;
+        let path = auth_file_path(&self.get().conf_path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("创建配置目录失败：{e}"))?;
         }
-        // 文件权限：Windows 下尽力限制到当前用户（失败不阻断，Cookie 仍只在本机）。
-        std::fs::write(&path, auth.cookie.as_bytes())
-            .map_err(|e| format!("写入 B 站登录 Cookie 失败：{e}"))?;
+        // 保留 auth.toml 里其它私有段（若以后扩展），只覆盖 [bili]。
+        let mut file = read_auth_file(&path).unwrap_or_default();
+        file.bili = Some(AuthBili {
+            uid: auth.uid,
+            cookie: auth.cookie.clone(),
+        });
+        write_auth_file(&path, &file)?;
         if let Ok(mut guard) = self.bili_auth.lock() {
             *guard = Some(auth.clone());
         }
         if let Ok(mut guard) = self.inner.lock() {
             guard.bili_uid = auth.uid;
         }
-        log::info!("[B站登录] 已保存登录态 uid={}，Cookie 文件 {}", auth.uid, path.display());
+        log::info!("[B站登录] 已保存登录态 uid={}，凭据文件 {}", auth.uid, path.display());
         Ok(self.get())
     }
 
     /// 清除登录 Cookie：删文件 + 清空内存，队列回退到游客连接。
     pub fn clear_bili_cookie(&self) -> Result<SettingsInfo, String> {
-        let path = cookie_file_path(&self.get().conf_path)?;
+        let path = auth_file_path(&self.get().conf_path)?;
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("删除 B 站登录 Cookie 失败：{e}"))?;
+            // 只清掉 [bili] 段，保留 auth.toml 里其它私有凭据。
+            let mut file = read_auth_file(&path).unwrap_or_default();
+            file.bili = None;
+            write_auth_file(&path, &file)?;
         }
         if let Ok(mut guard) = self.bili_auth.lock() {
             *guard = None;
@@ -268,32 +291,9 @@ pub fn load(exe_dir: &Path) -> LoadedConfig {
         }
     }
 
-    // B 站登录态：独立文件，解析失败只降级为游客，不让应用启动失败。
+    // B 站登录态：独立 auth.toml，解析失败只降级为游客，不让应用启动失败。
     // Cookie 内容绝不进日志，只记录成功/失败的 uid 或原因。
-    let bili_auth = match cookie_file_path(&path.to_string_lossy()).and_then(|p| {
-        if p.is_file() {
-            std::fs::read_to_string(&p)
-                .map_err(|e| format!("读取 B 站登录 Cookie 失败：{e}"))
-        } else {
-            Ok(String::new())
-        }
-    }) {
-        Ok(text) if !text.trim().is_empty() => match parse_bili_cookie(&text) {
-            Ok(auth) => {
-                log::info!("[B站登录] 已加载登录态 uid={}", auth.uid);
-                Some(auth)
-            }
-            Err(e) => {
-                warnings.push(format!("B 站登录 Cookie 无效，使用游客连接：{e}"));
-                None
-            }
-        },
-        Ok(_) => None,
-        Err(e) => {
-            warnings.push(e);
-            None
-        }
-    };
+    let bili_auth = load_bili_auth(&path, &mut warnings);
 
     let settings = SettingsInfo {
         portable: raw.portable,
@@ -365,15 +365,73 @@ fn fallback_settings() -> SettingsInfo {
     }
 }
 
-/// conf.toml 同目录下的 bili_cookie.txt 路径。
-fn cookie_file_path(conf_path: &str) -> Result<PathBuf, String> {
+/// conf.toml 同目录下的 auth.toml 路径。
+fn auth_file_path(conf_path: &str) -> Result<PathBuf, String> {
     if conf_path.trim().is_empty() {
-        return Err("无法确定配置目录，不能保存 B 站登录 Cookie".into());
+        return Err("无法确定配置目录，不能保存本地凭据".into());
     }
     Ok(Path::new(conf_path)
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(BILI_COOKIE_FILE))
+        .join(AUTH_FILE))
+}
+
+/// 读 auth.toml；文件不存在 / 解析失败都当空处理（凭据坏了不该阻断启动）。
+fn read_auth_file(path: &Path) -> Option<AuthFile> {
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<AuthFile>(&text).ok()
+}
+
+/// 写 auth.toml：带说明头，明确这是不会被备份的私有凭据。
+fn write_auth_file(path: &Path, file: &AuthFile) -> Result<(), String> {
+    let body = toml::to_string_pretty(file).map_err(|e| format!("序列化本地凭据失败：{e}"))?;
+    let text = format!(
+        "# 泉奈工具箱本地私有凭据\n\
+         # 此文件不会被导出/备份，也不要发给任何人；Cookie 等同 B 站账号登录态。\n\
+         # 可在设置页 → 开发者选项 → B 站登录 中修改。\n\n{body}"
+    );
+    std::fs::write(path, text).map_err(|e| format!("写入本地凭据失败：{e}"))
+}
+
+/// 启动时加载登录态，并顺手把旧版 bili_cookie.txt 迁移到 auth.toml 后删除。
+fn load_bili_auth(conf_path: &Path, warnings: &mut Vec<String>) -> Option<BiliAuth> {
+    let dir = conf_path.parent().unwrap_or_else(|| Path::new("."));
+    let auth_path = dir.join(AUTH_FILE);
+    let legacy_path = dir.join(LEGACY_BILI_COOKIE_FILE);
+
+    // 1. 旧文件迁移：读入 → 写进 auth.toml 的 [bili] 段 → 删除旧文件。
+    if legacy_path.is_file() && !auth_path.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&legacy_path) {
+            if let Ok(auth) = parse_bili_cookie(&text) {
+                let mut file = read_auth_file(&auth_path).unwrap_or_default();
+                file.bili = Some(AuthBili {
+                    uid: auth.uid,
+                    cookie: auth.cookie.clone(),
+                });
+                if let Err(e) = write_auth_file(&auth_path, &file) {
+                    warnings.push(format!("迁移旧版 B 站 Cookie 失败：{e}"));
+                } else {
+                    let _ = std::fs::remove_file(&legacy_path);
+                    log::info!("[B站登录] 已从 bili_cookie.txt 迁移到 auth.toml");
+                }
+            }
+        }
+    }
+
+    // 2. 从 auth.toml 的 [bili] 段恢复。
+    let file = read_auth_file(&auth_path)?;
+    let bili = file.bili?;
+    // 文件里存的是完整 Cookie，仍走同一套校验，确保 uid/SESSDATA 有效。
+    match parse_bili_cookie(&bili.cookie) {
+        Ok(auth) => {
+            log::info!("[B站登录] 已加载登录态 uid={}", auth.uid);
+            Some(auth)
+        }
+        Err(e) => {
+            warnings.push(format!("auth.toml 里的 B 站登录 Cookie 无效，使用游客连接：{e}"));
+            None
+        }
+    }
 }
 
 /// 从浏览器复制的 Cookie 字符串里解析出 uid 与弹幕连接可用的 Cookie 头。
@@ -385,7 +443,11 @@ fn cookie_file_path(conf_path: &str) -> Result<PathBuf, String> {
 /// 整个 Cookie 原样保存（含 buvid3/buvid4/bili_jct/sid 等），因为 B 站各接口
 /// 校验的字段会变，原样透传最稳妥。这里只做「是否登录」的最小校验。
 fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
-    let cookie = raw.trim();
+    // 去掉首尾空白、BOM，以及用户连 "Cookie: " 一起复制时带的前缀。
+    let mut cookie = raw.trim().trim_start_matches('\u{feff}').trim().to_string();
+    if cookie.len() >= 7 && cookie[..7].eq_ignore_ascii_case("cookie:") {
+        cookie = cookie[7..].trim().to_string();
+    }
     if cookie.is_empty() {
         return Err("Cookie 为空，请从已登录的 B 站页面复制完整 Cookie".into());
     }
@@ -398,22 +460,23 @@ fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
         };
         match key.trim() {
             "DedeUserID" => {
-                uid = value.trim().parse::<i64>().ok().filter(|id| *id > 0);
+                // 值可能带引号（从某些抓包工具复制时会出现），一并去掉。
+                let v = value.trim().trim_matches('"').trim();
+                uid = v.parse::<i64>().ok().filter(|id| *id > 0);
             }
             "SESSDATA" => {
-                has_sessdata = !value.trim().is_empty();
+                has_sessdata = !value.trim().trim_matches('"').trim().is_empty();
             }
             _ => {}
         }
     }
-    let uid = uid.ok_or("Cookie 中缺少有效的 DedeUserID（用户 uid）")?;
+    let uid = uid.ok_or(
+        "Cookie 中缺少有效的 DedeUserID（用户 uid）。请确认复制的是已登录 B 站账号的完整 Cookie，且不要缺字段",
+    )?;
     if !has_sessdata {
-        return Err("Cookie 中缺少 SESSDATA，请先登录 B 站再复制 Cookie".into());
+        return Err("Cookie 中缺少 SESSDATA，请先登录 B 站再复制完整 Cookie".into());
     }
-    Ok(BiliAuth {
-        uid,
-        cookie: cookie.to_string(),
-    })
+    Ok(BiliAuth { uid, cookie })
 }
 
 fn default_log_level() -> String {
@@ -497,5 +560,35 @@ mod tests {
         assert!(parse_bili_cookie("DedeUserID=abc; SESSDATA=x").is_err());
         // 空
         assert!(parse_bili_cookie("   ").is_err());
+    }
+
+    #[test]
+    fn parse_bili_cookie_tolerates_cookie_prefix_and_quotes() {
+        // 用户从 DevTools 连 "Cookie: " 一起复制、值带引号的情况
+        let raw = "Cookie: buvid3=ABC; DedeUserID=\"123456\"; SESSDATA=\"abc%2Fdef\"";
+        let auth = parse_bili_cookie(raw).unwrap();
+        assert_eq!(auth.uid, 123456);
+        assert_eq!(auth.cookie, "buvid3=ABC; DedeUserID=\"123456\"; SESSDATA=\"abc%2Fdef\"");
+        // 大小写前缀
+        assert!(parse_bili_cookie("cookie: DedeUserID=1; SESSDATA=x").is_ok());
+    }
+
+    #[test]
+    fn auth_toml_roundtrip_keeps_bili_section() {
+        let dir = std::env::temp_dir().join(format!("izuna-auth-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(AUTH_FILE);
+        let file = AuthFile {
+            bili: Some(AuthBili {
+                uid: 42,
+                cookie: "DedeUserID=42; SESSDATA=abc".into(),
+            }),
+        };
+        write_auth_file(&path, &file).unwrap();
+        let loaded = read_auth_file(&path).unwrap();
+        assert_eq!(loaded.bili.as_ref().map(|b| b.uid), Some(42));
+        let recovered = load_bili_auth(&dir.join("conf.toml"), &mut Vec::new()).unwrap();
+        assert_eq!(recovered.uid, 42);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
