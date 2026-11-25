@@ -66,34 +66,3 @@ jobs:
           $zip = Get-ChildItem -Path dist-portable -Filter '*.zip' | Select-Object -First 1
           if (-not $zip) { throw 'portable zip 未生成' }
           gh release upload "${{ github.ref_name }}" $zip.FullName --clobber
-
-      # ---- MSI（best effort，绝不影响上面的 NSIS 主发布）----
-      # WiX v3 在 GitHub Windows runner 上常因 light.exe 被 Defender 拦截而失败、
-      # 且工具链已归档，因此单独、可失败地尝试：成功就把 .msi 一并上传，
-      # 失败也只是没有 msi，NSIS 安装包 / 便携包 / Release 都照常产出。
-      # bundle.targets 仍是 ["nsis"]，这里用 --bundles 覆盖，只打 msi。
-      - name: build msi (best effort)
-        continue-on-error: true
-        run: npx tauri build --bundles msi
-
-      - name: upload msi artifact (best effort)
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: izuna-toolbox-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
-          if-no-files-found: ignore
-
-      - name: upload msi to release (best effort)
-        if: startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle/msi' -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $msi) {
-            Write-Host '未生成 MSI（WiX 在 runner 上可能失败），跳过上传；NSIS 主发布不受影响。'
-            exit 0
-          }
-          gh release upload "${{ github.ref_name }}" $msi.FullName --clobber

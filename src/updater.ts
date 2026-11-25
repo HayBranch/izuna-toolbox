@@ -21,7 +21,7 @@ const LAST_CHECK_KEY = "izuna.lastUpdateCheck";
 /** 启动检查节流：12 小时内不重复请求，缓解 GitHub 未认证 60 次/小时限额。 */
 const STARTUP_THROTTLE_MS = 12 * 60 * 60 * 1000;
 
-export type AssetKind = "nsis" | "msi";
+export type AssetKind = "nsis";
 
 export interface UpdateAsset {
   name: string;
@@ -79,7 +79,7 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** 整理出可下载的安装包（跳过便携 zip）：NSIS 优先、MSI 次之。 */
+/** 整理出可下载的安装包（只认 NSIS 安装包，跳过便携 zip）。 */
 function pickAssets(raw: unknown): UpdateAsset[] {
   if (!Array.isArray(raw)) return [];
   const out: UpdateAsset[] = [];
@@ -87,15 +87,11 @@ function pickAssets(raw: unknown): UpdateAsset[] {
     const name = typeof a?.name === "string" ? a.name : "";
     const url = typeof a?.browser_download_url === "string" ? a.browser_download_url : "";
     const size = typeof a?.size === "number" ? a.size : 0;
-    const lower = name.toLowerCase();
-    const kind: AssetKind | null = lower.endsWith(".msi")
-      ? "msi"
-      : lower.endsWith("-setup.exe")
-        ? "nsis"
-        : null;
-    if (kind && url) out.push({ name, url, size, kind });
+    if (name.toLowerCase().endsWith("-setup.exe") && url) {
+      out.push({ name, url, size, kind: "nsis" });
+    }
   }
-  return out.sort((x, y) => (x.kind === y.kind ? 0 : x.kind === "nsis" ? -1 : 1));
+  return out;
 }
 
 /**
@@ -257,6 +253,22 @@ export const cancelUpdate = () => invoke<void>("cancel_update");
 
 export const installUpdate = (path: string) =>
   invoke<void>("install_update", { path });
+
+/** 开发者选项「测试自动启动」的返回值（token 用于匹配探针事件） */
+export interface RelaunchTest {
+  token: string;
+  seconds: number;
+}
+
+/**
+ * 开发者选项自检：延迟数秒后带探针参数再启动一份当前程序，验证「新进程能启动并
+ * 连回本实例」。不会退出当前程序，也不碰已安装的文件。
+ */
+export const testRelaunch = () => invoke<RelaunchTest>("test_relaunch");
+
+/** 自检探针进程连回本实例时触发，payload 是 token。 */
+export const onRelaunchProbe = (cb: (token: string) => void) =>
+  listen<string>("relaunch-probe", (e) => cb(e.payload));
 
 export const onUpdateProgress = (cb: (p: UpdateProgress) => void) =>
   listen<UpdateProgress>("update-progress", (e) => cb(e.payload));

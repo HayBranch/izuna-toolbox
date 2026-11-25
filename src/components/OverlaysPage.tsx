@@ -12,9 +12,10 @@
  * - 外观：字号/颜色/加粗/描边/背景 + 自动换行与最大宽度
  * - 预览：模拟直播画面（所见即所得）+ 位置 X/Y
  *
- * 编辑策略：文本类输入用本地草稿 + 300ms 防抖提交；开关类立即提交。
- * 卡片右上角另有「保存」可立即落盘，并显示待保存/保存中/已保存状态。
- * Rust 侧每次变更都会 emit config-changed，回流的新配置在输入框未聚焦时覆盖草稿。
+ * 编辑策略（v0.1.3 起）：文本与样式改动只写本地草稿，点「保存」或按 Ctrl+S
+ * 才一次性写入 SQLite；开关、位置、尺寸、变量 −/＋ 这类即时操作仍然立即生效。
+ * 有未保存修改时返回列表 / 切换页面会弹窗询问「保存 / 丢弃 / 取消」。
+ * Rust 侧每次变更都会 emit config-changed；没有草稿修改时回流的新配置会同步进表单。
  * 任何命令失败都会显示在吸顶错误条里，不会"点了没反应"。
  */
 import { useEffect, useRef, useState } from "react";
@@ -42,6 +43,7 @@ import { formatDateTime } from "../utils";
 import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
 import SubtitleView from "./SubtitleView";
+import { useUnsavedGuard } from "./UnsavedGuard";
 
 /** 多行示例模板：一键替换成推荐排版（与后端 DEFAULT_TEMPLATE 一致） */
 const EXAMPLE_TEMPLATE = [
@@ -103,14 +105,20 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
       )}
 
       {open ? (
-        <OverlayEditor key={open.id} overlay={open} onBack={() => setOpenId(null)} run={run} />
+        <OverlayEditor
+          key={open.id}
+          overlay={open}
+          onBack={() => setOpenId(null)}
+          run={run}
+          reportError={setError}
+        />
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
               列表先看基本信息，点名称进入配置；<strong className="font-medium text-slate-600 dark:text-slate-300">显示 / 置顶 / 鼠标穿透可以直接点标签开关</strong>，不用进详情。
-              每套浮窗的变量、模板、样式完全独立。修改会自动写入本地 SQLite；
-              主窗口在前台时浮窗会临时取消置顶，切到游戏/桌面后恢复置顶，可直接拖动。
+              每套浮窗的变量、模板、样式完全独立；详情页改完点「保存」或按 Ctrl+S 才写入本地 SQLite，
+              未保存时切换页面会提示。主窗口在前台时浮窗会临时取消置顶，切到游戏/桌面后恢复置顶，可直接拖动。
             </p>
             <button
               onClick={() => void create()}
@@ -223,69 +231,196 @@ function OverlayEditor({
   overlay,
   onBack,
   run,
+  reportError,
 }: {
   overlay: OverlayConfig;
   onBack: () => void;
   run: Run;
+  reportError: (message: string | null) => void;
 }) {
-  // 本套浮窗自己的变量：模板芯片与预览都用它
-  const vars = computeVars(overlay, new Date());
-  const defs = varDefs(overlay);
-  const lookup = makeLookup(overlay);
-
+  const guard = useUnsavedGuard();
   const [draft, setDraft] = useState(overlay);
-  const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
-  const editingText = useRef(false);
-  const editVersion = useRef(0);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 防抖窗口内点了「返回列表」：组件卸载时把还没提交的草稿补一次，
-  // 避免刚改完就切走导致最后一次输入丢失。
-  const pending = useRef<{ next: OverlayConfig; version: number } | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  // 配置回流（自己提交的或别的窗口改的）：输入框没在编辑中就同步
+  // 配置回流（自己保存的或别的窗口改的）：没有未保存修改时整体同步；
+  // 有修改时只跟随「数值」这类运行时字段，绝不覆盖正在编辑的草稿。
   useEffect(() => {
-    if (!editingText.current) setDraft(overlay);
-  }, [overlay]);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-      const p = pending.current;
-      if (!p) return;
-      pending.current = null;
-      void updateOverlay(p.next).catch(console.warn);
-    },
-    [],
-  );
-
-  /** 立即保存本卡名称、账号、模板与外观；旧请求完成不能覆盖新编辑的状态。 */
-  const save = async (next: OverlayConfig, version = editVersion.current) => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
+    if (!dirty) {
+      setDraft(overlay);
+      return;
     }
-    setSaveState("saving");
-    const ok = await run(updateOverlay(next));
-    if (version === editVersion.current) {
-      pending.current = null;
-      setSaveState(ok ? "saved" : "error");
+    setDraft((d) => {
+      let changed = false;
+      const variables = d.variables.map((v) => {
+        const live = overlay.variables.find((x) => x.id === v.id);
+        if (live && live.value !== v.value) {
+          changed = true;
+          return { ...v, value: live.value };
+        }
+        return v;
+      });
+      return changed ? { ...d, variables } : d;
+    });
+  }, [overlay, dirty]);
+
+  // 预览与变量芯片用草稿（能即时看到未保存的改动），数值取服务器最新值。
+  const view: OverlayConfig = {
+    ...overlay,
+    ...draft,
+    variables: draft.variables.map((v) => {
+      const live = overlay.variables.find((x) => x.id === v.id);
+      return live ? { ...v, value: live.value } : v;
+    }),
+    computed: draft.computed,
+  };
+  const vars = computeVars(view, new Date());
+  const defs = varDefs(view);
+  const lookup = makeLookup(view);
+
+  /** 改草稿：只动本地状态，点「保存」/ Ctrl+S 才写数据库 */
+  const mutate = (fn: (d: OverlayConfig) => OverlayConfig) => {
+    setDraft(fn);
+    setDirty(true);
+    setFailed(false);
+  };
+  const patch = (partial: Partial<OverlayConfig>) => mutate((d) => ({ ...d, ...partial }));
+  const patchVariable = (id: number, partial: Partial<UserVar>) =>
+    mutate((d) => ({
+      ...d,
+      variables: d.variables.map((v) => (v.id === id ? { ...v, ...partial } : v)),
+    }));
+  const patchComputed = (id: number, partial: Partial<ComputedVar>) =>
+    mutate((d) => ({
+      ...d,
+      computed: d.computed.map((c) => (c.id === id ? { ...c, ...partial } : c)),
+    }));
+
+  const discard = () => {
+    setDraft(overlay);
+    setDirty(false);
+    setFailed(false);
+  };
+
+  /** 保存整套配置：浮窗字段 + 变量 / 计算变量里被改过的可编辑字段 */
+  const saveNow = async (): Promise<boolean> => {
+    if (saving) return false;
+    if (!dirty) return true;
+    const next = draft;
+    setSaving(true);
+    setFailed(false);
+    try {
+      let cfg = await updateOverlay(next);
+      let server = cfg.overlays.find((o) => o.id === next.id);
+      for (const v of next.variables) {
+        const old = server?.variables.find((x) => x.id === v.id);
+        if (!old) continue;
+        if (
+          old.key !== v.key ||
+          old.name !== v.name ||
+          old.step !== v.step ||
+          old.followId !== v.followId
+        ) {
+          cfg = await updateVariable(next.id, v);
+          server = cfg.overlays.find((o) => o.id === next.id);
+        }
+      }
+      for (const c of next.computed) {
+        const old = server?.computed.find((x) => x.id === c.id);
+        if (!old) continue;
+        if (
+          old.key !== c.key ||
+          old.name !== c.name ||
+          old.expr !== c.expr ||
+          old.format !== c.format ||
+          old.decimals !== c.decimals
+        ) {
+          cfg = await updateComputed(next.id, c);
+          server = cfg.overlays.find((o) => o.id === next.id);
+        }
+      }
+      setDraft(server ?? next);
+      setDirty(false);
+      reportError(null);
+      return true;
+    } catch (e) {
+      setFailed(true);
+      reportError(String(e));
+      return false;
+    } finally {
+      setSaving(false);
     }
   };
 
-  const push = (next: OverlayConfig, immediate = false) => {
-    editVersion.current += 1;
-    const version = editVersion.current;
-    pending.current = { next, version };
-    setDraft(next);
-    setSaveState("dirty");
-    if (timer.current) clearTimeout(timer.current);
-    const task = () => void save(next, version);
-    if (immediate) task();
-    else timer.current = setTimeout(task, 300);
+  // 守卫给「切换页面 / 返回列表」用：始终读最新一次渲染的状态与草稿。
+  const latest = useRef({ dirty, saving, saveNow, discard });
+  latest.current = { dirty, saving, saveNow, discard };
+  useEffect(() => {
+    if (!guard) return;
+    guard.register({
+      isDirty: () => latest.current.dirty && !latest.current.saving,
+      save: () => latest.current.saveNow(),
+      discard: () => latest.current.discard(),
+    });
+    return () => guard.register(null);
+  }, [guard]);
+
+  const leave = async () => {
+    if (guard && !(await guard.confirmLeave())) return;
+    onBack();
   };
 
-  const patch = (partial: Partial<OverlayConfig>, immediate = false) =>
-    push({ ...draft, ...partial }, immediate);
+  // 新增 / 删除变量是结构操作，立即落库；只把结果合并进草稿，不覆盖其它未保存输入。
+  const addVar = async () => {
+    try {
+      const cfg = await addVariable(overlay.id, "新变量", null, 0, 1);
+      const fresh = cfg.overlays.find((o) => o.id === overlay.id);
+      const added = fresh?.variables.find((v) => !draft.variables.some((d) => d.id === v.id));
+      if (added) setDraft((d) => ({ ...d, variables: [...d.variables, added] }));
+      reportError(null);
+    } catch (e) {
+      reportError(String(e));
+    }
+  };
+
+  const addComp = async () => {
+    try {
+      const cfg = await addComputed(overlay.id, "新计算", null, "A1 + A2", "plain", 0);
+      const fresh = cfg.overlays.find((o) => o.id === overlay.id);
+      const added = fresh?.computed.find((c) => !draft.computed.some((d) => d.id === c.id));
+      if (added) setDraft((d) => ({ ...d, computed: [...d.computed, added] }));
+      reportError(null);
+    } catch (e) {
+      reportError(String(e));
+    }
+  };
+
+  const removeVar = async (id: number) => {
+    try {
+      await deleteVariable(overlay.id, id);
+      setDraft((d) => ({
+        ...d,
+        variables: d.variables
+          .filter((v) => v.id !== id)
+          .map((v) => (v.followId === id ? { ...v, followId: 0 } : v)),
+      }));
+      reportError(null);
+    } catch (e) {
+      reportError(String(e));
+    }
+  };
+
+  const removeComp = async (id: number) => {
+    try {
+      await deleteComputed(overlay.id, id);
+      setDraft((d) => ({ ...d, computed: d.computed.filter((c) => c.id !== id) }));
+      reportError(null);
+    } catch (e) {
+      reportError(String(e));
+    }
+  };
 
   /** 在光标处插入文本（变量 token 或换行符） */
   const insertText = (text: string) => {
@@ -306,15 +441,21 @@ function OverlayEditor({
 
   const insertVar = (key: string) => insertText(`{${key}}`);
 
+  const saveState: "saved" | "dirty" | "saving" | "error" = saving
+    ? "saving"
+    : failed
+      ? "error"
+      : dirty
+        ? "dirty"
+        : "saved";
+
   return (
     <div
       className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60"
-      onFocusCapture={() => (editingText.current = true)}
-      onBlurCapture={() => (editingText.current = false)}
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
           e.preventDefault();
-          void save(draft);
+          void saveNow();
         }
       }}
     >
@@ -322,8 +463,8 @@ function OverlayEditor({
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={onBack}
-          title="返回浮窗列表"
+          onClick={() => void leave()}
+          title="返回浮窗列表（有未保存修改时会先询问）"
           className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
         >
           ← 返回列表
@@ -377,9 +518,9 @@ function OverlayEditor({
                   : "已保存"}
           </span>
           <button
-            onClick={() => void save(draft)}
+            onClick={() => void saveNow()}
             disabled={saveState === "saving"}
-            title="立即保存本卡的名称、账号、模板和外观（Ctrl+S）"
+            title="保存本卡的名称、账号、模板、外观与变量（Ctrl+S）"
             className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
               saveState === "dirty" || saveState === "error"
                 ? "border-indigo-400 bg-indigo-500 text-white hover:bg-indigo-400"
@@ -421,23 +562,26 @@ function OverlayEditor({
               </span>
             </p>
             <button
-              onClick={() => run(addVariable(overlay.id, "新变量", null, 0, 1))}
+              onClick={() => void addVar()}
               className="shrink-0 rounded-lg bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-indigo-400"
             >
               ＋ 添加
             </button>
           </div>
           <div className="mt-2 space-y-2">
-            {overlay.variables.map((v) => (
+            {draft.variables.map((v) => (
               <VarRow
                 key={v.id}
-                variable={v}
-                variables={overlay.variables}
+                variable={overlay.variables.find((x) => x.id === v.id) ?? v}
+                draft={v}
+                variables={draft.variables}
                 overlayId={overlay.id}
                 run={run}
+                onPatch={(partial) => patchVariable(v.id, partial)}
+                onDelete={() => void removeVar(v.id)}
               />
             ))}
-            {overlay.variables.length === 0 && (
+            {draft.variables.length === 0 && (
               <p className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-600">
                 还没有变量，点「＋ 添加」（比如：总数、人机、真人…）
               </p>
@@ -452,17 +596,23 @@ function OverlayEditor({
               </span>
             </p>
             <button
-              onClick={() => run(addComputed(overlay.id, "新计算", null, "A1 + A2", "plain", 0))}
+              onClick={() => void addComp()}
               className="shrink-0 rounded-lg bg-cyan-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-cyan-500"
             >
               ＋ 添加
             </button>
           </div>
           <div className="mt-2 space-y-2">
-            {overlay.computed.map((c) => (
-              <ComputedRow key={c.id} computed={c} overlayId={overlay.id} lookup={lookup} run={run} />
+            {draft.computed.map((c) => (
+              <ComputedRow
+                key={c.id}
+                draft={c}
+                lookup={lookup}
+                onPatch={(partial) => patchComputed(c.id, partial)}
+                onDelete={() => void removeComp(c.id)}
+              />
             ))}
-            {overlay.computed.length === 0 && (
+            {draft.computed.length === 0 && (
               <p className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-600">
                 比如「总胜率」= A4 / (A1 + A2)，格式选百分比
               </p>
@@ -545,8 +695,8 @@ function OverlayEditor({
           <ColorField label="字体颜色" value={draft.fontColor}
             onChange={(v) => patch({ fontColor: v })} />
           <div className="col-span-2 flex flex-wrap items-center gap-2">
-            <MiniToggle label="加粗" on={draft.bold} onClick={() => patch({ bold: !draft.bold }, true)} />
-            <MiniToggle label="描边阴影" on={draft.shadow} onClick={() => patch({ shadow: !draft.shadow }, true)} />
+            <MiniToggle label="加粗" on={draft.bold} onClick={() => patch({ bold: !draft.bold })} />
+            <MiniToggle label="描边阴影" on={draft.shadow} onClick={() => patch({ shadow: !draft.shadow })} />
           </div>
           <ColorField label="背景颜色" value={draft.bgColor}
             onChange={(v) => patch({ bgColor: v })} />
@@ -563,7 +713,7 @@ function OverlayEditor({
           </div>
           <div className="col-span-2 border-t border-slate-200 pt-3 dark:border-slate-800">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-              <MiniToggle label="自动换行" on={draft.wrap} onClick={() => patch({ wrap: !draft.wrap }, true)} />
+              <MiniToggle label="自动换行" on={draft.wrap} onClick={() => patch({ wrap: !draft.wrap })} />
               {draft.wrap && (
                 <label className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                   最大宽度
@@ -631,44 +781,6 @@ function OverlayEditor({
 
 // ---------- 变量编辑行（每套浮窗自己的） ----------
 
-/** 编辑行的通用行为：本地草稿 + 防抖提交；输入中不被事件回包打断 */
-function useRowDraft<T extends { id: number }>(source: T, run: Run, submit: (draft: T) => Promise<unknown>) {
-  const [draft, setDraft] = useState(source);
-  const editing = useRef(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 防抖窗口内切回列表：卸载时补交最后一次修改，避免丢字
-  const pending = useRef<T | null>(null);
-
-  useEffect(() => {
-    if (!editing.current) setDraft(source);
-  }, [source]);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-      const next = pending.current;
-      if (!next) return;
-      pending.current = null;
-      void run(submit(next));
-    },
-    [],
-  );
-
-  const commit = (partial: Partial<T>, immediate = false) => {
-    const next = { ...draft, ...partial };
-    pending.current = next;
-    setDraft(next);
-    if (timer.current) clearTimeout(timer.current);
-    const task = () => {
-      pending.current = null;
-      void run(submit(next));
-    };
-    if (immediate) task();
-    else timer.current = setTimeout(task, 400);
-  };
-
-  return { draft, commit, editing };
-}
-
 /** root 的所有下游（直接/间接跟随 root 的变量）。选跟随目标时排除，避免成环。 */
 function descendantsOf(vars: UserVar[], rootId: number): Set<number> {
   const children = new Map<number, number[]>();
@@ -695,19 +807,23 @@ function descendantsOf(vars: UserVar[], rootId: number): Set<number> {
 
 function VarRow({
   variable,
+  draft,
   variables,
   overlayId,
   run,
+  onPatch,
+  onDelete,
 }: {
+  /** 服务端最新值：−/＋ 与数值显示以它为准 */
   variable: UserVar;
+  /** 本地草稿：引用名 / 显示名 / 步长 / 联动先改草稿，随「保存」落库 */
+  draft: UserVar;
   variables: UserVar[];
   overlayId: number;
   run: Run;
+  onPatch: (partial: Partial<UserVar>) => void;
+  onDelete: () => void;
 }) {
-  const { draft, commit, editing } = useRowDraft(variable, run, (d) =>
-    updateVariable(overlayId, { ...d, step: d.step > 0 ? d.step : 1 }),
-  );
-
   // 联动选项：不能选自己，也不能选自己的下游（否则会成环）
   const blocked = descendantsOf(variables, draft.id);
   const followOptions = variables.filter((v) => v.id !== draft.id && !blocked.has(v.id));
@@ -715,15 +831,11 @@ function VarRow({
   const followers = variables.filter((v) => v.followId === draft.id);
 
   return (
-    <div
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40"
-      onFocusCapture={() => (editing.current = true)}
-      onBlurCapture={() => (editing.current = false)}
-    >
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40">
       {/* 引用名（模板里用 {A1} 引用） */}
       <input
         value={draft.key}
-        onChange={(e) => commit({ key: e.target.value })}
+        onChange={(e) => onPatch({ key: e.target.value })}
         title="引用名：模板和表达式里用 {A1} 这样引用"
         className="w-14 rounded-lg border border-cyan-300 bg-white px-2 py-1 text-center font-mono text-xs text-cyan-700 outline-none transition focus:border-cyan-500 dark:border-cyan-800/60 dark:bg-slate-950 dark:text-cyan-300"
       />
@@ -731,7 +843,7 @@ function VarRow({
       {/* 显示名 */}
       <input
         value={draft.name}
-        onChange={(e) => commit({ name: e.target.value })}
+        onChange={(e) => onPatch({ name: e.target.value })}
         placeholder="名字，如：总数"
         className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
       />
@@ -761,22 +873,19 @@ function VarRow({
           value={draft.step}
           onChange={(e) => {
             const v = Number(e.target.value);
-            if (Number.isFinite(v)) commit({ step: v });
+            if (Number.isFinite(v)) onPatch({ step: v });
           }}
           className="w-16 rounded-lg border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs text-slate-700 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
         />
       </label>
-      <ConfirmDelete
-        title={`删除变量「${draft.name}」`}
-        onConfirm={() => run(deleteVariable(overlayId, draft.id))}
-      />
+      <ConfirmDelete title={`删除变量「${draft.name}」`} onConfirm={onDelete} />
 
       {/* 联动：本变量跟随谁。被跟随变量 −/＋ 时，本变量同步同幅度的增减（单向）。 */}
       <div className="flex w-full flex-wrap items-center gap-2 border-t border-slate-200 pt-2 dark:border-slate-800/70">
         <span className="text-xs text-slate-500 dark:text-slate-500">🔗 联动</span>
         <select
           value={draft.followId}
-          onChange={(e) => commit({ followId: Number(e.target.value) }, true)}
+          onChange={(e) => onPatch({ followId: Number(e.target.value) })}
           aria-label="联动：跟随哪个变量"
           title="被跟随的变量每次 −/＋，这个变量也跟着同样幅度变化（单向）"
           className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition focus:border-cyan-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
@@ -804,49 +913,38 @@ function VarRow({
 }
 
 function ComputedRow({
-  computed,
-  overlayId,
+  draft,
   lookup,
-  run,
+  onPatch,
+  onDelete,
 }: {
-  computed: ComputedVar;
-  overlayId: number;
+  /** 本地草稿：引用名 / 显示名 / 表达式 / 格式 / 小数位先改草稿，随「保存」落库 */
+  draft: ComputedVar;
   lookup: (key: string) => number | null;
-  run: Run;
+  onPatch: (partial: Partial<ComputedVar>) => void;
+  onDelete: () => void;
 }) {
-  const { draft, commit, editing } = useRowDraft(computed, run, (d) =>
-    updateComputed(overlayId, {
-      ...d,
-      format: d.format === "percent" ? "percent" : "plain",
-      decimals: Math.min(6, Math.max(0, Math.round(d.decimals))),
-    }),
-  );
-
   // 实时预览：草稿表达式即时求值（不动数据库也能看到效果）
   const preview = evalExpr(draft.expr, lookup);
 
   return (
-    <div
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40"
-      onFocusCapture={() => (editing.current = true)}
-      onBlurCapture={() => (editing.current = false)}
-    >
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950/40">
       <input
         value={draft.key}
-        onChange={(e) => commit({ key: e.target.value })}
+        onChange={(e) => onPatch({ key: e.target.value })}
         title="引用名：模板和其它表达式里用 {B1} 这样引用"
         className="w-14 rounded-lg border border-cyan-300 bg-white px-2 py-1 text-center font-mono text-xs text-cyan-700 outline-none transition focus:border-cyan-500 dark:border-cyan-800/60 dark:bg-slate-950 dark:text-cyan-300"
       />
       <span className="text-slate-400 dark:text-slate-600">=</span>
       <input
         value={draft.name}
-        onChange={(e) => commit({ name: e.target.value })}
+        onChange={(e) => onPatch({ name: e.target.value })}
         placeholder="名字，如：总胜率"
         className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
       />
       <input
         value={draft.expr}
-        onChange={(e) => commit({ expr: e.target.value })}
+        onChange={(e) => onPatch({ expr: e.target.value })}
         placeholder="表达式，如：A1 + A2"
         className={`min-w-32 flex-1 rounded-lg border bg-white px-2 py-1 font-mono text-sm outline-none transition dark:bg-slate-950 ${
           preview === null
@@ -856,7 +954,7 @@ function ComputedRow({
       />
       <select
         value={draft.format}
-        onChange={(e) => commit({ format: e.target.value === "percent" ? "percent" : "plain" }, true)}
+        onChange={(e) => onPatch({ format: e.target.value === "percent" ? "percent" : "plain" })}
         className="rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
       >
         <option value="plain">普通数</option>
@@ -864,7 +962,7 @@ function ComputedRow({
       </select>
       <select
         value={draft.decimals}
-        onChange={(e) => commit({ decimals: Number(e.target.value) }, true)}
+        onChange={(e) => onPatch({ decimals: Number(e.target.value) })}
         title="小数点位数"
         className="rounded-lg border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
       >
@@ -886,10 +984,7 @@ function ComputedRow({
             ? fmtPercent(preview, draft.decimals)
             : fmtNum(preview, draft.decimals)}
       </span>
-      <ConfirmDelete
-        title={`删除计算变量「${draft.name}」`}
-        onConfirm={() => run(deleteComputed(overlayId, draft.id))}
-      />
+      <ConfirmDelete title={`删除计算变量「${draft.name}」`} onConfirm={onDelete} />
     </div>
   );
 }

@@ -7,7 +7,7 @@
  */
 import { getVersion } from "@tauri-apps/api/app";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   applyBackup,
   exportLocal,
@@ -28,6 +28,7 @@ import type {
   ThemeMode,
   WebdavConfig,
 } from "../types";
+import { onRelaunchProbe, testRelaunch } from "../updater";
 
 type SettingsTab = "appearance" | "developer" | "sync" | "about";
 
@@ -245,6 +246,59 @@ function DeveloperTab({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // ---- 更新后自动启动自检 ----
+  const [testing, setTesting] = useState(false);
+  const [probe, setProbe] = useState<{ ok: boolean; text: string } | null>(null);
+  const probeCleanup = useRef<(() => void) | null>(null);
+  const probeTimer = useRef<number | null>(null);
+
+  const stopProbe = () => {
+    probeCleanup.current?.();
+    probeCleanup.current = null;
+    if (probeTimer.current !== null) {
+      window.clearTimeout(probeTimer.current);
+      probeTimer.current = null;
+    }
+  };
+
+  // 离开设置页时清掉监听与超时，避免泄漏
+  useEffect(() => stopProbe, []);
+
+  const runRelaunchTest = async () => {
+    if (testing) return;
+    stopProbe();
+    setProbe(null);
+    setTesting(true);
+    try {
+      const { token, seconds } = await testRelaunch();
+      const started = Date.now();
+      probeCleanup.current = await onRelaunchProbe((t) => {
+        if (t !== token) return;
+        stopProbe();
+        setTesting(false);
+        setProbe({
+          ok: true,
+          text: `✓ 自检通过：模拟安装（${seconds} 秒）后，新进程在 ${(
+            (Date.now() - started) / 1000
+          ).toFixed(1)} 秒内启动并连回本程序。`,
+        });
+      });
+      probeTimer.current = window.setTimeout(() => {
+        stopProbe();
+        setTesting(false);
+        setProbe({
+          ok: false,
+          text:
+            "✗ 自检失败：30 秒内没有等到新进程。可把日志等级调到 info，查看 logs/ 里的记录。",
+        });
+      }, 30000);
+    } catch (e) {
+      stopProbe();
+      setTesting(false);
+      setProbe({ ok: false, text: `✗ 自检未能启动：${errorText(e)}` });
+    }
+  };
+
   const choose = async (level: LogLevel) => {
     if (!settings || level === current) return;
     setError("");
@@ -325,6 +379,36 @@ function DeveloperTab({
             </dd>
           </div>
         </dl>
+      </section>
+
+      <section className={CARD}>
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          更新后自动启动（自检）
+        </h3>
+        <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+          模拟「安装完成后启动新程序」：约 3 秒后带探针参数再启动一份当前程序，它会连回
+          当前窗口，收到连接即代表重启链路正常。真正的安装时机由安装包钩子保证；自检
+          不会退出当前程序，也不会改动已安装的文件。
+        </p>
+        <button
+          type="button"
+          disabled={testing}
+          onClick={() => void runRelaunchTest()}
+          className={`mt-4 ${BTN_SECONDARY}`}
+        >
+          {testing ? "自检中…（最多 30 秒）" : "测试自动启动"}
+        </button>
+        {probe && (
+          <p
+            className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+              probe.ok
+                ? "border-emerald-500/30 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                : "border-rose-500/30 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+            }`}
+          >
+            {probe.text}
+          </p>
+        )}
       </section>
     </div>
   );

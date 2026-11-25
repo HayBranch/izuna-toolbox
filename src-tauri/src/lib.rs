@@ -54,7 +54,17 @@ pub fn run() {
     // 而是把已经运行的实例显示出来并聚焦。
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // 自动更新装完后重启的自检：新进程带 `--relaunch-probe=<token>` 启动，
+            // 单实例插件把参数转交到这里，回传前端即代表「启动链路打通」。
+            if let Some(token) = args
+                .iter()
+                .find_map(|a| a.strip_prefix("--relaunch-probe="))
+            {
+                use tauri::Emitter;
+                log::info!("自动重启自检：探针进程已连接（{token}）");
+                let _ = app.emit("relaunch-probe", token.to_string());
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -262,6 +272,7 @@ pub fn run() {
             updater::download_update,
             updater::cancel_update,
             updater::install_update,
+            updater::test_relaunch,
             updater::fetch_mirror_list
         ])
         .run(tauri::generate_context!())

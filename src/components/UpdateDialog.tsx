@@ -227,7 +227,7 @@ export default function UpdateDialog({ onClose }: { onClose: () => void }) {
                 >
                   {info.assets.map((a, i) => (
                     <option key={a.url} value={i}>
-                      {a.kind === "msi" ? "MSI 安装包" : "NSIS 安装包（推荐）"} · {a.name}
+                      安装包 · {a.name}
                     </option>
                   ))}
                 </select>

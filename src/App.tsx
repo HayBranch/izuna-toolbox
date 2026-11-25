@@ -16,6 +16,7 @@ import OverlaysPage from "./components/OverlaysPage";
 import QueuesPage from "./components/QueuesPage";
 import QueueWindow from "./components/QueueWindow";
 import SettingsPage from "./components/SettingsPage";
+import { UnsavedGuardProvider, useUnsavedGuard } from "./components/UnsavedGuard";
 import UpdateDialog from "./components/UpdateDialog";
 import { applyThemeMode, type ThemeMode } from "./theme";
 import type { AppConfig, MovedEvent, SettingsInfo } from "./types";
@@ -49,12 +50,17 @@ export default function App() {
   }
   if (isOverlay) return <OverlayWindow />;
   if (isQueue) return <QueueWindow />;
-  return <MainShell />;
+  return (
+    <UnsavedGuardProvider>
+      <MainShell />
+    </UnsavedGuardProvider>
+  );
 }
 
 type MainPage = "overlays" | "queues" | "settings";
 
 function MainShell() {
+  const guard = useUnsavedGuard();
   const [page, setPage] = useState<MainPage>("overlays");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -117,8 +123,14 @@ function MainShell() {
     };
   }, []);
 
-  const togglePinned = async () => {
-    const next = !pinned;
+  // 切换页面：详情页有未保存修改时先询问（保存 / 丢弃 / 取消）
+  const goPage = async (next: MainPage) => {
+    if (next === page) return;
+    if (guard && !(await guard.confirmLeave())) return;
+    setPage(next);
+  };
+
+  const togglePinned = async () => {    const next = !pinned;
     try {
       await setMainAlwaysOnTop(next);
       setPinned(next);
@@ -257,13 +269,13 @@ function MainShell() {
             icon="🪟"
             label="悬浮字幕"
             active={page === "overlays"}
-            onClick={() => setPage("overlays")}
+            onClick={() => void goPage("overlays")}
           />
           <NavItem
             icon="💬"
             label="排队队列"
             active={page === "queues"}
-            onClick={() => setPage("queues")}
+            onClick={() => void goPage("queues")}
           />
         </nav>
 
@@ -278,7 +290,7 @@ function MainShell() {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setPage("settings")}
+              onClick={() => void goPage("settings")}
               aria-current={page === "settings" ? "page" : undefined}
               title="外观、开发者选项、配置同步与关于"
               className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${

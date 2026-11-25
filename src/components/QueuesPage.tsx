@@ -4,7 +4,9 @@
  * 2) 详情：直播间 / 刷新间隔 / 正则 / 排序 / 弹窗样式 / 成员管理 / 预览。
  *
  * 数据流与其他页面一致：命令写 SQLite → Rust 广播全量配置 → 这里按 id 重新取最新值。
- * 文本类输入用本地草稿 + 300ms 防抖提交；开关与成员操作立即提交。
+ * 编辑策略（v0.1.3 起）：直播间 / 刷新间隔 / 正则 / 排序 / 弹窗样式只写本地草稿，
+ * 点「保存」或按 Ctrl+S 才写入 SQLite；监听、显隐、置顶、穿透、成员增删改仍立即生效。
+ * 有未保存修改时返回列表 / 切换页面会弹窗询问「保存 / 丢弃 / 取消」。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -32,6 +34,7 @@ import { formatDateTime } from "../utils";
 import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
 import QueueView from "./QueueView";
+import { useUnsavedGuard } from "./UnsavedGuard";
 
 type Run = (p: Promise<unknown>) => Promise<boolean>;
 
@@ -114,6 +117,7 @@ export default function QueuesPage({ config }: { config: AppConfig }) {
           status={statuses[open.id]}
           onBack={() => setOpenId(null)}
           run={run}
+          reportError={setError}
         />
       ) : (
         <>
@@ -124,7 +128,8 @@ export default function QueuesPage({ config }: { config: AppConfig }) {
               <strong className="font-medium text-slate-600 dark:text-slate-300">
                 「刷新间隔」只控制批量写入与界面刷新频率
               </strong>
-              。列表里的监听 / 显示 / 置顶 / 穿透可以直接点标签切换。
+              。列表里的监听 / 显示 / 置顶 / 穿透可以直接点标签切换。详情页改完点「保存」或按 Ctrl+S 才写入本地 SQLite，
+              未保存时切换页面会提示。
             </p>
             <button
               onClick={() => void create()}
@@ -274,22 +279,23 @@ function QueueEditor({
   status,
   onBack,
   run,
+  reportError,
 }: {
   queue: QueueConfig;
   allQueues: QueueConfig[];
   status?: QueueStatus;
   onBack: () => void;
   run: Run;
+  reportError: (message: string | null) => void;
 }) {
+  const guard = useUnsavedGuard();
   const [draft, setDraft] = useState(queue);
   const [patternText, setPatternText] = useState(queue.patterns.join("\n"));
-  const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [nickname, setNickname] = useState("");
   const [addCount, setAddCount] = useState(1);
-  const editingText = useRef(false);
-  const editVersion = useRef(0);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pending = useRef<{ next: QueueConfig; version: number } | null>(null);
 
   const patternList = useMemo(() => splitPatterns(patternText), [patternText]);
   const patternErrs = useMemo(() => patternErrors(patternList), [patternList]);
@@ -299,71 +305,76 @@ function QueueEditor({
   const live = useMemo(() => ({ ...queue, ...draft, entries: queue.entries }), [queue, draft]);
   const badge = connectionBadge(queue, status);
 
-  // 配置回流（自己提交的或别的窗口改的）：输入框没在编辑、也没有待保存修改时同步
+  // 配置回流（自己保存的或别的窗口改的）：没有未保存修改时整体同步；
+  // 有修改时保留草稿，只跟随成员名单这类运行时字段（live 已单独处理）。
   useEffect(() => {
-    if (editingText.current || saveState !== "saved") return;
+    if (dirty) return;
     setDraft(queue);
     setPatternText(queue.patterns.join("\n"));
-  }, [queue, saveState]);
+  }, [queue, dirty]);
 
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-      const p = pending.current;
-      if (!p) return;
-      pending.current = null;
-      void updateQueue(p.next).catch(console.warn);
-    },
-    [],
-  );
-
-  const save = async (next: QueueConfig, version = editVersion.current) => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    if (patternErrors(next.patterns).length > 0) {
-      setSaveState("dirty");
-      return;
-    }
-    setSaveState("saving");
-    const ok = await run(updateQueue(next));
-    if (version === editVersion.current) {
-      pending.current = null;
-      setSaveState(ok ? "saved" : "error");
-    }
-  };
-
-  const push = (partial: Partial<QueueConfig>, immediate = false) => {
-    const next = { ...draft, ...partial };
-    editVersion.current += 1;
-    const version = editVersion.current;
-    pending.current = { next, version };
-    setDraft(next);
-    setSaveState("dirty");
-    if (timer.current) clearTimeout(timer.current);
-    const task = () => void save(next, version);
-    if (immediate) task();
-    else timer.current = setTimeout(task, 300);
+  /** 改草稿：只动本地状态，点「保存」/ Ctrl+S 才写数据库 */
+  const patch = (partial: Partial<QueueConfig>) => {
+    setDraft((d) => ({ ...d, ...partial }));
+    setDirty(true);
+    setFailed(false);
   };
 
   const changePatterns = (text: string) => {
     setPatternText(text);
-    const patterns = splitPatterns(text);
-    if (patternErrors(patterns).length === 0 && patterns.some((p) => p.trim() !== "")) {
-      push({ patterns });
-    } else {
-      if (timer.current) clearTimeout(timer.current);
-      setSaveState("dirty");
+    setDirty(true);
+    setFailed(false);
+  };
+
+  const discard = () => {
+    setDraft(queue);
+    setPatternText(queue.patterns.join("\n"));
+    setDirty(false);
+    setFailed(false);
+  };
+
+  /** 保存整套配置：直播间 / 间隔 / 正则 / 排序 / 弹窗样式 */
+  const saveNow = async (): Promise<boolean> => {
+    if (saving) return false;
+    if (!dirty) return true;
+    if (patternErrors(patternList).length > 0 || !patternsValid) {
+      setFailed(true);
+      reportError("正则不合法或为空，请修正后再保存");
+      return false;
+    }
+    setSaving(true);
+    setFailed(false);
+    try {
+      const next = { ...draft, patterns: patternList };
+      await updateQueue(next);
+      setDirty(false);
+      reportError(null);
+      return true;
+    } catch (e) {
+      setFailed(true);
+      reportError(String(e));
+      return false;
+    } finally {
+      setSaving(false);
     }
   };
 
-  const saveNow = () => {
-    if (!patternsValid) {
-      setSaveState("error");
-      return;
-    }
-    void save({ ...draft, patterns: splitPatterns(patternText) });
+  // 守卫给「切换页面 / 返回列表」用：始终读最新一次渲染的状态与草稿。
+  const latest = useRef({ dirty, saving, saveNow, discard });
+  latest.current = { dirty, saving, saveNow, discard };
+  useEffect(() => {
+    if (!guard) return;
+    guard.register({
+      isDirty: () => latest.current.dirty && !latest.current.saving,
+      save: () => latest.current.saveNow(),
+      discard: () => latest.current.discard(),
+    });
+    return () => guard.register(null);
+  }, [guard]);
+
+  const leave = async () => {
+    if (guard && !(await guard.confirmLeave())) return;
+    onBack();
   };
 
   const addEntry = async () => {
@@ -375,15 +386,21 @@ function QueueEditor({
 
   const realRoom = status?.realRoomId && status.realRoomId !== queue.roomId ? status.realRoomId : null;
 
+  const saveState: "saved" | "dirty" | "saving" | "error" = saving
+    ? "saving"
+    : failed
+      ? "error"
+      : dirty
+        ? "dirty"
+        : "saved";
+
   return (
     <div
       className="space-y-5"
-      onFocusCapture={() => (editingText.current = true)}
-      onBlurCapture={() => (editingText.current = false)}
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
           e.preventDefault();
-          saveNow();
+          void saveNow();
         }
       }}
     >
@@ -392,15 +409,15 @@ function QueueEditor({
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={onBack}
-            title="返回队列列表"
+            onClick={() => void leave()}
+            title="返回队列列表（有未保存修改时会先询问）"
             className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
           >
             ← 返回列表
           </button>
           <input
             value={draft.name}
-            onChange={(e) => push({ name: e.target.value })}
+            onChange={(e) => patch({ name: e.target.value })}
             placeholder="队列名称（例如：排队上车）"
             aria-label="队列名称"
             className="min-w-40 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-lg font-semibold text-slate-900 outline-none transition hover:border-slate-300 focus:border-indigo-500 dark:text-slate-100 dark:hover:border-slate-700"
@@ -412,7 +429,7 @@ function QueueEditor({
             {badge.text}
           </span>
 
-          <SaveBadge state={saveState} onClick={saveNow} />
+          <SaveBadge state={saveState} onClick={() => void saveNow()} />
           <ConfirmDelete
             title={`删除队列「${queue.name || "未命名队列"}」及其全部名单`}
             onConfirm={() => void run(deleteQueue(queue.id))}
@@ -470,7 +487,7 @@ function QueueEditor({
             min={0}
             max={999_999_999}
             integer
-            onChange={(v) => push({ roomId: v }, true)}
+            onChange={(v) => patch({ roomId: v })}
           />
           <NumberField
             label="刷新间隔（秒）"
@@ -478,7 +495,7 @@ function QueueEditor({
             min={1}
             max={60}
             integer
-            onChange={(v) => push({ pollSecs: v }, true)}
+            onChange={(v) => patch({ pollSecs: v })}
           />
           <NumberField
             label="弹窗最多显示（人）"
@@ -486,7 +503,7 @@ function QueueEditor({
             min={1}
             max={100}
             integer
-            onChange={(v) => push({ maxEntries: v }, true)}
+            onChange={(v) => patch({ maxEntries: v })}
           />
           <div className="text-xs text-slate-500 dark:text-slate-400">
             排序方式
@@ -494,12 +511,12 @@ function QueueEditor({
               <MiniToggle
                 label="发送时间"
                 on={draft.sortMode === "time"}
-                onClick={() => push({ sortMode: "time" }, true)}
+                onClick={() => patch({ sortMode: "time" })}
               />
               <MiniToggle
                 label="发送次数"
                 on={draft.sortMode === "count"}
-                onClick={() => push({ sortMode: "count" }, true)}
+                onClick={() => patch({ sortMode: "count" })}
               />
             </div>
             <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-600">
@@ -555,23 +572,23 @@ function QueueEditor({
             min={10}
             max={72}
             integer
-            onChange={(v) => push({ fontSize: v }, true)}
+            onChange={(v) => patch({ fontSize: v })}
           />
-          <ColorField label="文字颜色" value={draft.fontColor} onChange={(v) => push({ fontColor: v }, true)} />
-          <ColorField label="背景颜色" value={draft.bgColor} onChange={(v) => push({ bgColor: v }, true)} />
+          <ColorField label="文字颜色" value={draft.fontColor} onChange={(v) => patch({ fontColor: v })} />
+          <ColorField label="背景颜色" value={draft.bgColor} onChange={(v) => patch({ bgColor: v })} />
           <NumberField
             label="背景不透明度（%）"
             value={draft.bgOpacity}
             min={0}
             max={100}
             integer
-            onChange={(v) => push({ bgOpacity: v }, true)}
+            onChange={(v) => patch({ bgOpacity: v })}
           />
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
-          <MiniToggle label="加粗" on={draft.bold} onClick={() => push({ bold: !draft.bold }, true)} />
-          <MiniToggle label="文字描边" on={draft.shadow} onClick={() => push({ shadow: !draft.shadow }, true)} />
+          <MiniToggle label="加粗" on={draft.bold} onClick={() => patch({ bold: !draft.bold })} />
+          <MiniToggle label="文字描边" on={draft.shadow} onClick={() => patch({ shadow: !draft.shadow })} />
           <label className="flex items-center gap-2">
             自动宽度上限
             <InlineNumber
@@ -579,7 +596,7 @@ function QueueEditor({
               min={80}
               max={3000}
               suffix="px"
-              onChange={(v) => push({ maxWidth: v }, true)}
+              onChange={(v) => patch({ maxWidth: v })}
             />
           </label>
           <span className="text-slate-400 dark:text-slate-600">

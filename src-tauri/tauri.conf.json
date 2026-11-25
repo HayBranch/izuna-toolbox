@@ -41,9 +41,9 @@
       "webviewInstallMode": { "type": "skip" },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese", "English"]
-      },
-      "wix": { "language": "zh-CN" }
+        "languages": ["SimpChinese", "English"],
+        "installerHooks": "./windows/hooks.nsh"
+      }
     }
   }
 }

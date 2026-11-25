@@ -12,7 +12,7 @@ Tauri 2 桌面应用（优先 Windows）：悬浮字幕浮窗工具，字幕窗�
 npm install             # 首次安装
 npm run tauri dev       # 开发：Vite :1420 + Rust 改动自动重编译
 npm run tauri build     # 正式构建（普通 exe + NSIS，输出在 src-tauri/target/release/bundle/）
-npm run bundle          # tauri build --bundles nsis,msi（MSI 是 best-effort，CI 上常失败，见下文）
+npm run bundle          # tauri build（普通 exe + NSIS 安装包，输出在 src-tauri/target/release/bundle/nsis/）
 npm run bundle:portable # 构建 exe 后用 node scripts/package-portable.mjs 打包到 dist-portable/
 npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；不提交、不打标签
 ```
@@ -34,13 +34,15 @@ npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；
 
 - 格式：`vX.Y.Z <类型>: <中文描述>`，例如 `v0.1.1 docs: 将 AGENTS.md 中文化并补充提交信息规范`。
 - 版本号 = 最新的 `v*` 标签加一；提交前用 `git describe --tags --abbrev=0` 查最新标签。
+- **未经用户明确允许，不要新建或移动 `v*` 标签。** 打标签 / 推标签会触发发布流水线，
+  由用户决定何时发版；改完代码、更新 README 后停在「已提交、待打标签」即可，等用户发话再 `git tag`。
 - `<类型>` 用 `feat` / `fix` / `docs` / `chore` 等常见类别，描述一律中文。
 
 ## 发布流水线（两套，对应不同托管环境）
 
-- `.github/workflows/main.yml` —— Windows runner；NSIS 安装包 + portable zip；MSI 以 `continue-on-error` 构建，因为 runner 上 Defender 常拦截 WiX `light.exe`。主发布路径。
+- `.github/workflows/main.yml` —— Windows runner；NSIS 安装包 + portable zip。主发布路径。
 - `.cnb.yml`（CNB，Linux 容器）+ `.workflow/打包.yml` —— Linux 无法产 NSIS，所以用 `--target x86_64-pc-windows-gnu --no-bundle` 交叉编译 exe，并且在 `package-portable.mjs` 之前**必须把 `WebView2Loader.dll`**（从 cargo registry 或 `target/` 中找，仅 x64）拷到 exe 同目录。不要“简化”掉这一步。
-- `tauri.conf.json` 的 `bundle.targets` 保持 `["nsis"]`；MSI 只在命令行用 `--bundles msi` 覆盖时产出。
+- `tauri.conf.json` 的 `bundle.targets` 保持 `["nsis"]`；v0.1.3 起只发布 NSIS 安装包（exe）与便携 zip，不再构建 MSI。
 
 ## 架构要点
 
@@ -49,6 +51,7 @@ npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；
 - **状态注册顺序很重要**：`app.manage(store)` 必须在任何窗口创建之前，否则浮窗首次 `get_config` 会报 "state not managed"。见 `src-tauri/src/lib.rs`。
 - 启动配置：`exe 同目录/conf/conf.toml` 决定 `portable`（数据库：`true` → exe 同目录 `data/`，`false` → `%APPDATA%/com.izuna.toolbox/`）和 `log_level`。日志固定写 exe 同目录 `logs/`；旧 `portable.flag` 只在首次生成配置时作为默认值参考。
 - 自动更新仅 Windows（`Cargo.toml` 里 `reqwest`/`tokio` 用 `cfg(windows)` 控制）；下载放在 Rust 侧，因为发布资产的 CDN 重定向会阻止 webview 跨域读取。
+- **装完自动重启**：NSIS 安装包靠 `src-tauri/windows/hooks.nsh` 的 `NSIS_HOOK_POSTINSTALL`（由 `tauri.conf.json` 的 `bundle.windows.nsis.installerHooks` 引入）在 `/UPDATE` 更新模式下拉起新版程序；v0.1.3 起只发布 NSIS 安装包，因此不再需要外部看门脚本。开发者选项「测试自动启动」会延迟启动一份带 `--relaunch-probe=` 的当前程序，由单实例插件回传参数验证启动链路。
 - 初始/种子数据（默认浮窗、变量、计算变量）定义在 `src-tauri/src/store.rs` 顶部（`SEED_VARIABLES` / `SEED_COMPUTED`）——首次运行和清空浮窗后重建都会用到。
 
 ## 严格控制体积的构建配置

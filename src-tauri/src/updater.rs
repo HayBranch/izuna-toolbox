@@ -4,6 +4,11 @@
 //! 302 跳到**没有 CORS 头**的 `release-assets.githubusercontent.com`，前端
 //! `fetch` 读不到安装包字节。因此「检查」在前端、「下载 + 安装」落在这里。
 //!
+//! 装完自动重启（v0.1.3）：NSIS 安装包带 `src-tauri/windows/hooks.nsh` 里的
+//! `NSIS_HOOK_POSTINSTALL`，在 `/UPDATE`（更新模式）下文件全部落盘后直接运行
+//! 新版 exe。这是安装器内部的最后一步，不存在外部看门进程「猜安装是否结束」
+//! 时可能抢跑的竞态，因此不再需要任何兜底脚本（v0.1.3 只发布 exe + 便携包）。
+//!
 //! 网络代码与 reqwest/tokio 依赖一起 gate 到 `cfg(windows)`：本应用只发布
 //! Windows 版，这样 Linux 原生构建（CNB pipeline）完全不编译这些依赖，
 //! windows-gnu 交叉编译也只会带上 schannel（纯 Rust，无需 C / OpenSSL）。
@@ -112,8 +117,7 @@ async fn download_update_impl(
         .unwrap_or("")
         .to_string();
     let lower = name.to_ascii_lowercase();
-    if name.is_empty() || name != file_name || !(lower.ends_with(".exe") || lower.ends_with(".msi"))
-    {
+    if name.is_empty() || name != file_name || !lower.ends_with("-setup.exe") {
         return Err("安装包文件名不合法".into());
     }
 
@@ -232,106 +236,105 @@ fn install_update_impl(app: AppHandle, path: String) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext != "exe" && ext != "msi" {
+    if ext != "exe" {
         return Err("安装包类型不合法".into());
     }
 
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
-    let mut cmd = if ext == "msi" {
-        let mut c = std::process::Command::new("msiexec");
-        c.arg("/i")
-            .arg(&canonical)
-            .arg("/passive")
-            .arg("/norestart");
-        c
-    } else {
-        // NSIS 用 Tauri 模板内置的更新模式参数：/UPDATE 原地覆盖安装——
-        // 不运行旧版卸载器、不删除/重建桌面与开始菜单快捷方式（图标位置不变），
-        // 注册表版本信息就地更新；/P 被动模式只显示进度条页并自动关闭，不弹向导。
-        let mut c = std::process::Command::new(&canonical);
-        c.arg("/UPDATE").arg("/P");
-        c
-    };
-    // 脱离本进程：app.exit(0) 之后安装器仍能继续运行。
-    let installer = cmd
+    // NSIS 用 Tauri 模板内置的更新模式参数：/UPDATE 原地覆盖安装——
+    // 不运行旧版卸载器、不删除/重建桌面与开始菜单快捷方式（图标位置不变），
+    // 注册表版本信息就地更新；/P 被动模式只显示进度条页并自动关闭，不弹向导。
+    //
+    // 装完的自动重启由安装包自带的 NSIS_HOOK_POSTINSTALL 完成（见
+    // `src-tauri/windows/hooks.nsh`）：被动模式会跳过「完成后运行」完成页，
+    // 钩子在文件全部落盘后直接拉起新版 exe。
+    let installer = std::process::Command::new(&canonical)
+        .arg("/UPDATE")
+        .arg("/P")
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| format!("启动安装器失败：{e}"))?;
-    let installer_pid = installer.id();
-
-    // 装完自动重启：Tauri 的 NSIS 模板只有在「完成页」才勾选运行程序，而被动模式
-    // (/P) 会跳过完成页并 SetAutoClose，MSI 更是没有任何启动动作，所以必须自己拉起。
-    // 做法是先挂一个脱离进程的 PowerShell 看门程序，它等旧进程退出、新 exe 文件
-    // 解锁（安装替换完成）后再启动，避免和正在退出的旧实例抢单实例锁。
-    let current_exe = std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if !current_exe.is_empty() {
-        let mut waiter = relaunch_waiter_command(installer_pid, &current_exe);
-        let _ = waiter
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-            .spawn();
-    }
+    log::info!(
+        "自动更新：安装器已启动（pid={}，{}）",
+        installer.id(),
+        canonical.display()
+    );
 
     app.exit(0);
     Ok(())
 }
 
-/// 生成一个 PowerShell 看门进程：等安装器真正写完目标 exe 后再启动它。
+#[cfg(not(windows))]
+fn install_update_impl(_app: AppHandle, _path: String) -> Result<(), String> {
+    Err("自动更新仅支持 Windows".into())
+}
+
+// ---------------------------------------------------------------------------
+// 装完自动重启
+// ---------------------------------------------------------------------------
+
+/// 开发者选项「测试自动启动」的返回值。
+#[derive(Clone, Serialize)]
+pub struct RelaunchTest {
+    /// 探针标记：新进程带 `--relaunch-probe=<token>` 启动，连回本实例时前端据此确认。
+    pub token: String,
+    /// 模拟安装耗时（秒）。
+    pub seconds: u64,
+}
+
+/// 开发者选项自检：不退出程序、不动已安装文件，验证「新进程启动后能连回本程序」。
 ///
-/// 判定「装完了」不能靠安装器 PID：被动模式（NSIS `/UPDATE /P`）的引导进程会
-/// 提前退出、msiexec 更是先派生提权子进程再退出，「PID 没了」不代表文件已替换完。
-/// 也不能只看 exe 能否独占打开——旧实例 `app.exit(0)` 释放自身句柄后文件就可能
-/// 打得开，但安装器此刻可能仍在写入。若看门进程抢先启动，会和安装器抢单实例锁或
-/// 拿到写到一半的文件，导致装完不自动重启（v0.1.0 实测复现）。
-///
-/// 因此轮询三件事**连续两次**都成立才启动：exe 能独占打开（未被占用）、且
-/// `LastWriteTime` 与上一轮相同（安装器不再写入 = 替换完成）。任意一轮不满足就
-/// 重新计数。超时则放弃等待（用户手动打开即可）。
+/// 真正的「装完自动启动」由安装包的 `NSIS_HOOK_POSTINSTALL` 完成，应用内部无法
+/// 复现安装器的时机；这里延迟 N 秒后再启动一次当前 exe（模拟安装耗时），并带上
+/// `--relaunch-probe=<token>`。新进程由单实例插件把参数转交给本实例，前端收到
+/// 事件即说明启动链路与探针回传都正常。
+#[tauri::command]
+pub fn test_relaunch() -> Result<RelaunchTest, String> {
+    test_relaunch_impl()
+}
+
 #[cfg(windows)]
-fn relaunch_waiter_command(installer_pid: u32, exe_path: &str) -> std::process::Command {
-    let quoted = exe_path.replace('\'', "''");
-    // Wait-Process 只是尽快跨过安装阶段（多半早已退出、立即返回）；
-    // 真正的就绪判定是后面的「文件解锁 + 写入时间连续稳定」。
-    let script = format!(
-        "$ErrorActionPreference='SilentlyContinue';\
-         Wait-Process -Id {installer_pid} -Timeout 600;\
-         $sw=[Diagnostics.Stopwatch]::StartNew();\
-         $prev=[DateTime]::MinValue;\
-         $stable=0;\
-         while($sw.Elapsed.TotalSeconds -lt 180){{\
-           $ok=$false;\
-           try{{\
-             $f=[IO.File]::Open('{quoted}','Open','ReadWrite','None');\
-             $f.Close(); $ok=$true\
-           }}catch{{}}\
-           $cur=([IO.FileInfo]'{quoted}').LastWriteTime;\
-           if($ok -and $cur -eq $prev){{ $stable++ }}else{{ $stable=0 }}\
-           $prev=$cur;\
-           if($stable -ge 1){{ Start-Process -FilePath '{quoted}'; break }}\
-           Start-Sleep -Seconds 2\
-         }}"
+fn test_relaunch_impl() -> Result<RelaunchTest, String> {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const SIMULATED_INSTALL_SECS: u64 = 3;
+
+    let exe = std::env::current_exe().map_err(|e| format!("找不到当前 exe：{e}"))?;
+    let token = format!(
+        "probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
     );
-    let mut c = std::process::Command::new("powershell.exe");
-    c.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-        &script,
-    ]);
-    // 工作目录别留在安装目录里：进程的 cwd 会占住目录，可能妨碍安装器替换文件。
-    c.current_dir(std::env::temp_dir());
-    c
+    let probe_arg = format!("--relaunch-probe={token}");
+
+    // 延迟放在后台线程里等，命令立刻返回，前端才能先挂上探针监听。
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(SIMULATED_INSTALL_SECS));
+        match std::process::Command::new(&exe)
+            .arg(&probe_arg)
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+        {
+            Ok(child) => log::info!("自动重启自检：探针进程已启动（pid={}）", child.id()),
+            Err(e) => log::error!("自动重启自检：启动探针进程失败：{e}"),
+        }
+    });
+
+    log::info!("自动重启自检：{SIMULATED_INSTALL_SECS} 秒后启动探针进程");
+    Ok(RelaunchTest {
+        token,
+        seconds: SIMULATED_INSTALL_SECS,
+    })
 }
 
 #[cfg(not(windows))]
-fn install_update_impl(_app: AppHandle, _path: String) -> Result<(), String> {
+fn test_relaunch_impl() -> Result<RelaunchTest, String> {
     Err("自动更新仅支持 Windows".into())
 }
