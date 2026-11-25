@@ -10,11 +10,13 @@ import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-
 import { useEffect, useRef, useState } from "react";
 import {
   applyBackup,
+  clearBiliCookie,
   exportLocal,
   exportWebdav,
   openLogDir,
   openUrl,
   resetSettings,
+  saveBiliCookie,
   saveLogLevel,
   saveTheme,
   selectLocalBackup,
@@ -249,6 +251,50 @@ function DeveloperTab({
   const [diagBusy, setDiagBusy] = useState(false);
   const [diagNote, setDiagNote] = useState("");
 
+  // ---- B 站登录态（真实 uid / 昵称）----
+  const biliUid = settings?.biliUid ?? 0;
+  const [cookieInput, setCookieInput] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginNote, setLoginNote] = useState("");
+  const [loginError, setLoginError] = useState("");
+
+  const applyCookie = async () => {
+    if (!cookieInput.trim()) {
+      setLoginError("请先粘贴 B 站 Cookie");
+      return;
+    }
+    setLoginBusy(true);
+    setLoginError("");
+    setLoginNote("");
+    try {
+      const next = await saveBiliCookie(cookieInput.trim());
+      onSettings(next);
+      setCookieInput("");
+      setLoginNote(
+        `已登录 uid=${next.biliUid}，弹幕连接已用登录态重连，可获取真实 uid/昵称。`,
+      );
+    } catch (e) {
+      setLoginError(errorText(e));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const removeCookie = async () => {
+    setLoginBusy(true);
+    setLoginError("");
+    setLoginNote("");
+    try {
+      const next = await clearBiliCookie();
+      onSettings(next);
+      setLoginNote("已清除登录态，弹幕连接已恢复游客模式。");
+    } catch (e) {
+      setLoginError(errorText(e));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
   // ---- 更新后自动启动自检 ----
   const [testing, setTesting] = useState(false);
   const [probe, setProbe] = useState<{ ok: boolean; text: string } | null>(null);
@@ -384,6 +430,82 @@ function DeveloperTab({
         {error && (
           <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
             {error}
+          </p>
+        )}
+      </section>
+
+      <section className={CARD}>
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          B 站登录（获取真实 uid / 昵称）
+        </h3>
+        <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+          游客连接时，B 站会把弹幕的 uid 全部改成 0、昵称打码（如 <code>泉***</code>
+          ），工具无法反查真实身份。登录后服务端会下发真实 uid 与完整昵称，多个游客
+          弹幕也不再被误当成同一个人。Cookie 只存本机 <code>conf/bili_cookie.txt</code>
+          ，不进配置备份、不写日志。
+        </p>
+
+        <div className="mt-3 flex items-center gap-2 text-sm">
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${
+              biliUid > 0 ? "bg-emerald-500" : "bg-slate-400"
+            }`}
+          />
+          <span className={biliUid > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}>
+            {biliUid > 0 ? `已登录 · uid ${biliUid}` : "未登录 · 游客连接"}
+          </span>
+        </div>
+
+        <div className="mt-3">
+          <label className="block text-xs text-slate-500 dark:text-slate-400">
+            从已登录 B 站的浏览器复制整条 Cookie 粘贴到下方（需包含{" "}
+            <code className="font-mono">DedeUserID</code> 与{" "}
+            <code className="font-mono">SESSDATA</code>）：
+          </label>
+          <textarea
+            value={cookieInput}
+            onChange={(e) => setCookieInput(e.target.value)}
+            rows={3}
+            spellCheck={false}
+            placeholder="DedeUserID=123456; SESSDATA=xxxx; bili_jct=xxxx; buvid3=xxxx; ..."
+            className="mt-1.5 w-full resize-y rounded-lg border border-slate-300 bg-white/70 px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100"
+          />
+          <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-600">
+            获取方式：浏览器登录 live.bilibili.com → F12 → Network → 刷新 → 点任意一个
+            api.bilibili.com 请求 → 请求头 Request Headers 里的 Cookie 整行复制。Cookie
+            等同账号登录态，请勿外泄；过期后队列会断开，重新粘贴即可。
+          </p>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={loginBusy || !cookieInput.trim()}
+            onClick={() => void applyCookie()}
+            className={BTN_PRIMARY}
+          >
+            {loginBusy ? "处理中…" : "保存并重新连接"}
+          </button>
+          {biliUid > 0 && (
+            <button
+              type="button"
+              disabled={loginBusy}
+              onClick={() => void removeCookie()}
+              className={BTN_SECONDARY}
+            >
+              清除登录
+            </button>
+          )}
+        </div>
+
+        {loginNote && (
+          <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            {loginNote}
+          </p>
+        )}
+        {loginError && (
+          <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            {loginError}
           </p>
         )}
       </section>

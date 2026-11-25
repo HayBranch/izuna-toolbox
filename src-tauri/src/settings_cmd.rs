@@ -60,6 +60,31 @@ pub fn open_log_dir(settings: State<'_, SettingsState>) -> Result<String, String
     Ok(dir.display().to_string())
 }
 
+/// 保存 B 站登录 Cookie：解析 uid 后写入 conf/bili_cookie.txt（不进 conf.toml、
+/// 不进备份）。成功后重启所有弹幕连接，让新登录态立即生效——服务端只在
+/// 登录连接里下发真实 uid 和未打码昵称，游客连接一律 uid=0 + 打码昵称。
+#[tauri::command]
+pub fn set_bili_cookie(
+    app: AppHandle,
+    cookie: String,
+    settings: State<'_, SettingsState>,
+) -> Result<SettingsInfo, String> {
+    let info = settings.set_bili_cookie(&cookie)?;
+    danmaku::reconcile(&app);
+    Ok(info)
+}
+
+/// 清除 B 站登录 Cookie，恢复游客连接；同样重启弹幕连接。
+#[tauri::command]
+pub fn clear_bili_cookie(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+) -> Result<SettingsInfo, String> {
+    let info = settings.clear_bili_cookie()?;
+    danmaku::reconcile(&app);
+    Ok(info)
+}
+
 #[tauri::command]
 pub fn reset_settings(settings: State<'_, SettingsState>) -> Result<SettingsInfo, String> {
     settings.reset()

@@ -80,16 +80,24 @@ mod imp {
 
     impl DanmakuManager {
         pub fn reconcile(&self, app: &AppHandle, queues: &[QueueConfig]) {
+            // 登录 uid 纳入签名：切换登录/游客状态时，下面的签名对比会发现变化，
+            // 自动停掉旧连接并用新登录态重连，不需要额外的 force 参数。
+            let login_uid = app
+                .state::<crate::app_config::SettingsState>()
+                .bili_auth()
+                .map(|a| a.uid)
+                .unwrap_or(0);
             let mut desired: HashMap<i64, String> = HashMap::new();
             for q in queues {
                 if q.enabled && q.room_id > 0 {
-                    desired.insert(q.id, format!("{}:{}", q.room_id, q.poll_secs));
+                    desired.insert(q.id, format!("{}:{}:{}", q.room_id, q.poll_secs, login_uid));
                 }
             }
             log::info!(
-                "[弹幕] reconcile：数据库队列 {} 个，需监听 {} 个（enabled 且有直播间号）",
+                "[弹幕] reconcile：数据库队列 {} 个，需监听 {} 个（enabled 且有直播间号，登录 uid={}）",
                 queues.len(),
-                desired.len()
+                desired.len(),
+                login_uid
             );
 
             // 一次持有 workers 锁，原子完成「停旧 + 占位新」。
@@ -381,7 +389,23 @@ mod imp {
             "队列 #{queue_id}：获取到 {} 个弹幕服务器",
             hosts.len()
         );
-        // 3. 匿名弹幕也建议带 buvid，减少被风控拒绝的概率
+        // 3. 登录态：服务端只对登录连接下发真实 uid 与未打码昵称；
+        //    游客连接一律 uid=0、昵称打码（如 `泉***`），无法反查真实身份。
+        //    Cookie 只放在内存/独立文件里，绝不打印内容。
+        let bili_auth = app
+            .state::<crate::app_config::SettingsState>()
+            .bili_auth();
+        let login_uid = bili_auth.as_ref().map(|a| a.uid).unwrap_or(0);
+        if login_uid > 0 {
+            log::info!(
+                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录态连接 uid={login_uid}，可获取真实 uid/昵称"
+            );
+        } else {
+            log::info!(
+                "[弹幕] queue_id={queue_id} room={real_room_id} 使用游客连接（uid=0，昵称会被服务端打码；可在设置页粘贴 B 站 Cookie 登录）"
+            );
+        }
+        // 匿名弹幕也建议带 buvid，减少被风控拒绝的概率
         let buvid = fetch_buvid(client).await;
 
         let (host, port) = hosts[*host_turn % hosts.len()].clone();
@@ -396,9 +420,19 @@ mod imp {
             headers.insert("Origin", HeaderValue::from_static(REFERER.trim_end_matches('/')));
             headers.insert("Referer", HeaderValue::from_static(REFERER));
             headers.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-            if let Some(buvid) = buvid.as_deref() {
-                if let Ok(value) = HeaderValue::from_str(&format!("buvid3={buvid}")) {
+            // 登录连接用用户粘贴的完整 Cookie；游客连接只带 buvid 降低风控概率。
+            let cookie_value = if let Some(auth) = bili_auth.as_ref() {
+                Some(auth.cookie.clone())
+            } else {
+                buvid
+                    .as_deref()
+                    .map(|b| format!("buvid3={b}"))
+            };
+            if let Some(cookie) = cookie_value {
+                if let Ok(value) = HeaderValue::from_str(&cookie) {
                     headers.insert("Cookie", value);
+                } else {
+                    log::warn!("[弹幕] queue_id={queue_id} Cookie 含非法字符，未能加入请求头");
                 }
             }
         }
@@ -410,9 +444,9 @@ mod imp {
         .map_err(|_| "连接弹幕服务器超时".to_string())?
         .map_err(|e| format!("连接弹幕服务器失败：{e}"))?;
 
-        // 4. 鉴权
+        // 4. 鉴权：uid 用登录账号的真实 uid（游客为 0）
         let auth = serde_json::json!({
-            "uid": 0,
+            "uid": login_uid,
             "roomid": real_room_id,
             "protover": 2,
             "platform": "web",

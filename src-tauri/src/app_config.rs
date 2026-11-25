@@ -17,6 +17,9 @@ pub const CONF_DIR: &str = "conf";
 pub const CONF_FILE: &str = "conf.toml";
 pub const DATA_DIR: &str = "data";
 pub const LOGS_DIR: &str = "logs";
+/// B 站登录 Cookie 单独存，绝不写进 conf.toml：备份导出/导入只处理 conf.toml，
+/// 这样导出的配置不会把账号登录态带出去。
+pub const BILI_COOKIE_FILE: &str = "bili_cookie.txt";
 
 /// 旧版便携标记，仅用于在首次生成 conf.toml 时推断默认值。
 const LEGACY_PORTABLE_FLAG: &str = "portable.flag";
@@ -46,6 +49,18 @@ pub struct SettingsInfo {
     pub log_level: String,
     pub conf_path: String,
     pub log_dir: String,
+    /// B 站登录 uid；>0 表示已配置登录态，0 表示游客连接（弹幕 uid 会被打码成 0）。
+    pub bili_uid: i64,
+}
+
+/// B 站登录态：从用户粘贴的 Cookie 中解析出 uid 与可用于 WebSocket 的 Cookie 头。
+/// 只存在内存与 `conf/bili_cookie.txt`，不进 conf.toml、不写日志、不参与备份。
+#[derive(Debug, Clone)]
+pub struct BiliAuth {
+    /// 登录账号 uid（来自 DedeUserID）
+    pub uid: i64,
+    /// 发往弹幕服务器的完整 Cookie 头（含 SESSDATA / buvid3 等）
+    pub cookie: String,
 }
 
 pub struct LoadedConfig {
@@ -53,17 +68,22 @@ pub struct LoadedConfig {
     pub log_level: log::LevelFilter,
     pub path: PathBuf,
     pub warnings: Vec<String>,
+    /// 启动时从 conf/bili_cookie.txt 读到的登录态（解析失败则为 None）
+    pub bili_auth: Option<BiliAuth>,
 }
 
 /// 运行时配置状态：设置页读改写都走它，保证内存与 conf.toml 一致。
 pub struct SettingsState {
     inner: Mutex<SettingsInfo>,
+    /// 登录态单独存放：改 Cookie 不需要重写 conf.toml。
+    bili_auth: Mutex<Option<BiliAuth>>,
 }
 
 impl SettingsState {
-    pub fn new(settings: SettingsInfo) -> Self {
+    pub fn new(settings: SettingsInfo, bili_auth: Option<BiliAuth>) -> Self {
         Self {
             inner: Mutex::new(settings),
+            bili_auth: Mutex::new(bili_auth),
         }
     }
 
@@ -72,6 +92,53 @@ impl SettingsState {
             .lock()
             .map(|s| s.clone())
             .unwrap_or_else(|_| fallback_settings())
+    }
+
+    /// 供弹幕连接读取当前登录态。绝不打印 cookie 内容。
+    pub fn bili_auth(&self) -> Option<BiliAuth> {
+        self.bili_auth
+            .lock()
+            .ok()
+            .and_then(|auth| auth.clone())
+    }
+
+    /// 保存登录 Cookie：解析 uid 与 Cookie 头 → 写独立文件 → 更新内存。
+    /// 返回的 SettingsInfo 里 bili_uid > 0 表示登录成功。
+    pub fn set_bili_cookie(&self, raw: &str) -> Result<SettingsInfo, String> {
+        let auth = parse_bili_cookie(raw)?;
+        let path = cookie_file_path(&self.get().conf_path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建配置目录失败：{e}"))?;
+        }
+        // 文件权限：Windows 下尽力限制到当前用户（失败不阻断，Cookie 仍只在本机）。
+        std::fs::write(&path, auth.cookie.as_bytes())
+            .map_err(|e| format!("写入 B 站登录 Cookie 失败：{e}"))?;
+        if let Ok(mut guard) = self.bili_auth.lock() {
+            *guard = Some(auth.clone());
+        }
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.bili_uid = auth.uid;
+        }
+        log::info!("[B站登录] 已保存登录态 uid={}，Cookie 文件 {}", auth.uid, path.display());
+        Ok(self.get())
+    }
+
+    /// 清除登录 Cookie：删文件 + 清空内存，队列回退到游客连接。
+    pub fn clear_bili_cookie(&self) -> Result<SettingsInfo, String> {
+        let path = cookie_file_path(&self.get().conf_path)?;
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("删除 B 站登录 Cookie 失败：{e}"))?;
+        }
+        if let Ok(mut guard) = self.bili_auth.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.bili_uid = 0;
+        }
+        log::info!("[B站登录] 已清除登录态，队列将使用游客连接");
+        Ok(self.get())
     }
 
     pub fn set_theme(&self, theme: &str) -> Result<SettingsInfo, String> {
@@ -201,12 +268,40 @@ pub fn load(exe_dir: &Path) -> LoadedConfig {
         }
     }
 
+    // B 站登录态：独立文件，解析失败只降级为游客，不让应用启动失败。
+    // Cookie 内容绝不进日志，只记录成功/失败的 uid 或原因。
+    let bili_auth = match cookie_file_path(&path.to_string_lossy()).and_then(|p| {
+        if p.is_file() {
+            std::fs::read_to_string(&p)
+                .map_err(|e| format!("读取 B 站登录 Cookie 失败：{e}"))
+        } else {
+            Ok(String::new())
+        }
+    }) {
+        Ok(text) if !text.trim().is_empty() => match parse_bili_cookie(&text) {
+            Ok(auth) => {
+                log::info!("[B站登录] 已加载登录态 uid={}", auth.uid);
+                Some(auth)
+            }
+            Err(e) => {
+                warnings.push(format!("B 站登录 Cookie 无效，使用游客连接：{e}"));
+                None
+            }
+        },
+        Ok(_) => None,
+        Err(e) => {
+            warnings.push(e);
+            None
+        }
+    };
+
     let settings = SettingsInfo {
         portable: raw.portable,
         theme,
         log_level: log_level.clone(),
         conf_path: path.display().to_string(),
         log_dir: log_dir.display().to_string(),
+        bili_uid: bili_auth.as_ref().map(|a| a.uid).unwrap_or(0),
     };
 
     LoadedConfig {
@@ -214,6 +309,7 @@ pub fn load(exe_dir: &Path) -> LoadedConfig {
         settings,
         path,
         warnings,
+        bili_auth,
     }
 }
 
@@ -265,7 +361,59 @@ fn fallback_settings() -> SettingsInfo {
         log_level: DEFAULT_LOG_LEVEL.to_string(),
         conf_path: String::new(),
         log_dir: String::new(),
+        bili_uid: 0,
     }
+}
+
+/// conf.toml 同目录下的 bili_cookie.txt 路径。
+fn cookie_file_path(conf_path: &str) -> Result<PathBuf, String> {
+    if conf_path.trim().is_empty() {
+        return Err("无法确定配置目录，不能保存 B 站登录 Cookie".into());
+    }
+    Ok(Path::new(conf_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(BILI_COOKIE_FILE))
+}
+
+/// 从浏览器复制的 Cookie 字符串里解析出 uid 与弹幕连接可用的 Cookie 头。
+///
+/// 必需字段：
+/// - `DedeUserID`：登录 uid（>0）；游客连接时服务端看到的 uid=0。
+/// - `SESSDATA`：登录凭证；缺失说明不是登录态。
+///
+/// 整个 Cookie 原样保存（含 buvid3/buvid4/bili_jct/sid 等），因为 B 站各接口
+/// 校验的字段会变，原样透传最稳妥。这里只做「是否登录」的最小校验。
+fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
+    let cookie = raw.trim();
+    if cookie.is_empty() {
+        return Err("Cookie 为空，请从已登录的 B 站页面复制完整 Cookie".into());
+    }
+    let mut uid: Option<i64> = None;
+    let mut has_sessdata = false;
+    for pair in cookie.split(';') {
+        let pair = pair.trim();
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "DedeUserID" => {
+                uid = value.trim().parse::<i64>().ok().filter(|id| *id > 0);
+            }
+            "SESSDATA" => {
+                has_sessdata = !value.trim().is_empty();
+            }
+            _ => {}
+        }
+    }
+    let uid = uid.ok_or("Cookie 中缺少有效的 DedeUserID（用户 uid）")?;
+    if !has_sessdata {
+        return Err("Cookie 中缺少 SESSDATA，请先登录 B 站再复制 Cookie".into());
+    }
+    Ok(BiliAuth {
+        uid,
+        cookie: cookie.to_string(),
+    })
 }
 
 fn default_log_level() -> String {
@@ -324,5 +472,30 @@ pub fn level_filter(value: &str) -> log::LevelFilter {
         "debug" => log::LevelFilter::Debug,
         "trace" => log::LevelFilter::Trace,
         _ => log::LevelFilter::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bili_cookie_extracts_uid_and_keeps_full_cookie() {
+        let raw = "buvid3=ABC; DedeUserID=123456; SESSDATA=abc%2Fdef; bili_jct=token; sid=xyz";
+        let auth = parse_bili_cookie(raw).unwrap();
+        assert_eq!(auth.uid, 123456);
+        assert_eq!(auth.cookie, raw);
+    }
+
+    #[test]
+    fn parse_bili_cookie_rejects_guest_or_incomplete_cookie() {
+        // 游客 Cookie：没有 DedeUserID / SESSDATA
+        assert!(parse_bili_cookie("buvid3=ABC; bili_jct=token").is_err());
+        // 有 uid 但缺 SESSDATA
+        assert!(parse_bili_cookie("DedeUserID=123").is_err());
+        // uid 非法
+        assert!(parse_bili_cookie("DedeUserID=abc; SESSDATA=x").is_err());
+        // 空
+        assert!(parse_bili_cookie("   ").is_err());
     }
 }

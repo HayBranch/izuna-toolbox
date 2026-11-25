@@ -157,6 +157,8 @@ export interface SettingsInfo {
   confPath: string;
   /** 日志目录（exe 同目录 logs/） */
   logDir: string;
+  /** B 站登录 uid；>0 表示已登录（弹幕可拿到真实 uid/昵称），0 为游客 */
+  biliUid: number;
 }
 
 /** WebDAV 连接信息（只保存在 WebView localStorage，不写 conf.toml） */

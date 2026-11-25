@@ -193,7 +193,14 @@ export const saveTheme = (theme: ThemeMode) =>
 export const saveLogLevel = (level: LogLevel) =>
   invoke<SettingsInfo>("set_log_level", { level });
 
-/** 恢复默认设置（外观 auto + 日志 error；不影响 SQLite 数据） */
+/** 保存 B 站登录 Cookie（解析 uid 后重启弹幕连接，用登录态拿真实 uid/昵称） */
+export const saveBiliCookie = (cookie: string) =>
+  invoke<SettingsInfo>("set_bili_cookie", { cookie });
+
+/** 清除 B 站登录 Cookie，恢复游客连接 */
+export const clearBiliCookie = () => invoke<SettingsInfo>("clear_bili_cookie");
+
+/** 恢复默认设置（外观 auto + 日志 error；不影响 SQLite 数据和 B 站登录） */
 export const resetSettings = () => invoke<SettingsInfo>("reset_settings");
 
 /** 打开 exe 同目录的 logs/（排查弹幕连接用），返回日志目录绝对路径 */

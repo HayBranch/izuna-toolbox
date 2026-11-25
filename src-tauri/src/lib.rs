@@ -127,7 +127,10 @@ pub fn run() {
             app.manage(store.clone());
             // 应用设置（外观 / 日志等级）与待导入备份：设置页与导入命令共用。
             // 必须在任何窗口创建前注册，否则页面首次 get_settings 会报 state not managed。
-            app.manage(app_config::SettingsState::new(loaded.settings.clone()));
+            app.manage(app_config::SettingsState::new(
+                loaded.settings.clone(),
+                loaded.bili_auth.clone(),
+            ));
             app.manage(backup::PendingBackup::default());
             app.manage(overlay_win::MeasuredSet(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
@@ -265,6 +268,8 @@ pub fn run() {
             settings_cmd::get_settings,
             settings_cmd::set_theme,
             settings_cmd::set_log_level,
+            settings_cmd::set_bili_cookie,
+            settings_cmd::clear_bili_cookie,
             settings_cmd::reset_settings,
             settings_cmd::open_log_dir,
             settings_cmd::export_local,
