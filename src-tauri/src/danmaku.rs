@@ -498,6 +498,13 @@ mod imp {
                     }
                     if !pending.is_empty() {
                         let hits = std::mem::take(pending);
+                        // 排查用：打印本批真正要写入的 UID，和"收到弹幕"日志对照即可判断
+                        // 是没收到、收到没命中、还是命中了没写进去。
+                        let uids: Vec<i64> = hits.iter().map(|(uid, _, _)| *uid).collect();
+                        log::info!(
+                            "[弹幕] queue_id={queue_id} room={real_room_id} 准备写入本批命中 {} 条，UID={uids:?}",
+                            hits.len()
+                        );
                         let store = app.state::<Arc<Store>>();
                         match store.record_queue_matches(queue_id, &hits) {
                             Ok(n) if n > 0 => {
@@ -549,6 +556,12 @@ mod imp {
                                 return Err(format!("解析弹幕包失败：{e}"));
                             }
                             for (op, value) in decoded {
+                                // 排查用：把解包出来的每种消息都打印，
+                                // 避免"收包很多、弹幕=0"时看不出到底收到了什么。
+                                if op == 5 {
+                                    let cmd = value.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+                                    log::debug!("[弹幕] queue_id={queue_id} room={real_room_id} 收到 op=5 消息 cmd={cmd:?}");
+                                }
                                 if op == 8 {
                                     last_data_at = std::time::Instant::now();
                                     let code = value.get("code").and_then(as_i64).unwrap_or(-1);
@@ -584,30 +597,66 @@ mod imp {
                                         s.last_error.clear();
                                     });
                                 }
+                                // 排查用：每条 op=5 通知都打印原始 cmd 与关键字段，
+                                // 让用户能直接看到"收到的到底是什么、为什么没 +1"。
+                                let cmd = value
+                                    .get("cmd")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("(无 cmd)");
+                                let is_danmu = cmd.starts_with("DANMU_MSG");
                                 let Some((uid, nickname, text, at)) = parse_danmaku(&value) else {
+                                    if is_danmu {
+                                        // 收到弹幕但字段解析失败：这是"收包有、弹幕=0"的关键线索，
+                                        // 打印截断的原始 JSON 便于对照 B 站协议字段变化。
+                                        let raw = value.to_string();
+                                        let preview: String = raw.chars().take(400).collect();
+                                        log::warn!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 收到 DANMU_MSG 但解析字段失败（info 结构变化？）：{preview}"
+                                        );
+                                    } else {
+                                        log::info!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 收到非弹幕通知：cmd={cmd:?}，跳过"
+                                        );
+                                    }
                                     continue;
                                 };
                                 received_danmaku += 1;
+                                log::info!(
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 收到弹幕：uid={uid} 昵称={nickname:?} 内容={text:?} 弹幕时间={at}"
+                                );
                                 let now = now_ms();
                                 if now - last_message_written >= 1000 {
                                     last_message_written = now;
                                     patch_status(app, queue_id, |s| s.last_message_at = now);
                                 }
                                 if uid <= 0 || nickname.trim().is_empty() {
+                                    log::info!(
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 跳过：UID 或昵称为空（uid={uid} 昵称={nickname:?}）"
+                                    );
                                     continue;
                                 }
-                                if !patterns.iter().any(|re| re.is_match(&text)) {
+                                let hit = patterns.iter().position(|re| re.is_match(&text));
+                                let Some(rule_idx) = hit else {
+                                    log::info!(
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 未命中：内容={text:?}（当前 {} 条正则均未匹配）",
+                                        patterns.len()
+                                    );
                                     continue;
-                                }
-                                let key = format!("{uid}:{at}:{text}");
+                                };
+                                // 去重 key 不再依赖弹幕自带时间戳：B 站部分版本该字段是秒级
+                                // 或缺失后回退成同值，手动连发相同文本会被误判重复、不再 +1。
+                                // 改用「本队列内到达流水号」保证每条到达的弹幕都能独立计数。
+                                let key = format!("{uid}:{text}:{received_danmaku}");
                                 if is_duplicate(&mut seen, key) {
                                     duplicates += 1;
-                                    log::debug!("[弹幕] queue_id={queue_id} 忽略重复弹幕：uid={uid} at={at} text={text:?}");
+                                    log::info!(
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 判定重复跳过：uid={uid} 内容={text:?}（重复数={duplicates}）"
+                                    );
                                     continue;
                                 }
                                 matched += 1;
-                                log::debug!(
-                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中：uid={uid} nickname={nickname:?} text={text:?}，待写入={}",
+                                log::info!(
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} uid={uid} 昵称={nickname:?} 内容={text:?}，待写入={}",
                                     pending.len() + 1
                                 );
                                 pending.push((uid, nickname, at));
