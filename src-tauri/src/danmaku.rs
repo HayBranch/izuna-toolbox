@@ -80,24 +80,29 @@ mod imp {
 
     impl DanmakuManager {
         pub fn reconcile(&self, app: &AppHandle, queues: &[QueueConfig]) {
-            // 登录 uid 纳入签名：切换登录/游客状态时，下面的签名对比会发现变化，
-            // 自动停掉旧连接并用新登录态重连，不需要额外的 force 参数。
-            let login_uid = app
+            // 登录态纳入签名：切换登录/游客状态、或更换 Cookie 时，签名对比会
+            // 发现变化，自动停掉旧连接并用新登录态重连，不需要额外的 force 参数。
+            // 用 uid + SESSDATA 短哈希（绝不含 Cookie 明文），这样即使 Cookie 里
+            // 缺 DedeUserID（uid 回退为 0），换 Cookie 也能触发重连。
+            let login_sig = app
                 .state::<crate::app_config::SettingsState>()
                 .bili_auth()
-                .map(|a| a.uid)
-                .unwrap_or(0);
+                .map(|a| format!("{}:{}", a.uid, short_hash(&a.sessdata)))
+                .unwrap_or_else(|| "guest".to_string());
             let mut desired: HashMap<i64, String> = HashMap::new();
             for q in queues {
                 if q.enabled && q.room_id > 0 {
-                    desired.insert(q.id, format!("{}:{}:{}", q.room_id, q.poll_secs, login_uid));
+                    desired.insert(
+                        q.id,
+                        format!("{}:{}:{}", q.room_id, q.poll_secs, login_sig),
+                    );
                 }
             }
             log::info!(
-                "[弹幕] reconcile：数据库队列 {} 个，需监听 {} 个（enabled 且有直播间号，登录 uid={}）",
+                "[弹幕] reconcile：数据库队列 {} 个，需监听 {} 个（enabled 且有直播间号，登录={}）",
                 queues.len(),
                 desired.len(),
-                login_uid
+                if login_sig == "guest" { "游客" } else { "已登录" }
             );
 
             // 一次持有 workers 锁，原子完成「停旧 + 占位新」。
@@ -392,21 +397,32 @@ mod imp {
         // 3. 登录态：服务端只对登录连接下发真实 uid 与未打码昵称；
         //    游客连接一律 uid=0、昵称打码（如 `泉***`），无法反查真实身份。
         //    Cookie 只放在内存/独立文件里，绝不打印内容。
+        //
+        //    关键：B 站弹幕 WebSocket 的登录态只靠 Cookie 里的 SESSDATA 传递，
+        //    鉴权包的 uid 必须保持 0（服务端依据 SESSDATA 识别账号并下发真实身份）。
+        //    曾经的实现把 uid 填成 DedeUserID、Cookie 又塞进 buvid3/buvid4/sid
+        //    等完整字段，与鉴权包里另取的 buvid 冲突，服务端在鉴权阶段直接 RST
+        //    （表现：连接成功→发鉴权包→0 秒断开、收包=0）。这里对齐主流库做法：
+        //    只发 SESSDATA、uid=0、不额外带 buvid。
         let bili_auth = app
             .state::<crate::app_config::SettingsState>()
             .bili_auth();
-        let login_uid = bili_auth.as_ref().map(|a| a.uid).unwrap_or(0);
-        if login_uid > 0 {
+        let sessdata = bili_auth.as_ref().map(|a| a.sessdata.clone());
+        if sessdata.is_some() {
             log::info!(
-                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录态连接 uid={login_uid}，可获取真实 uid/昵称"
+                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录态连接（仅发送 SESSDATA，鉴权 uid=0），服务端将下发真实 uid/昵称"
             );
         } else {
             log::info!(
                 "[弹幕] queue_id={queue_id} room={real_room_id} 使用游客连接（uid=0，昵称会被服务端打码；可在设置页粘贴 B 站 Cookie 登录）"
             );
         }
-        // 匿名弹幕也建议带 buvid，减少被风控拒绝的概率
-        let buvid = fetch_buvid(client).await;
+        // 仅游客连接需要 buvid 降低风控概率；登录连接只发 SESSDATA，避免设备指纹冲突。
+        let buvid = if sessdata.is_none() {
+            fetch_buvid(client).await
+        } else {
+            None
+        };
 
         let (host, port) = hosts[*host_turn % hosts.len()].clone();
         *host_turn = host_turn.wrapping_add(1);
@@ -420,14 +436,13 @@ mod imp {
             headers.insert("Origin", HeaderValue::from_static(REFERER.trim_end_matches('/')));
             headers.insert("Referer", HeaderValue::from_static(REFERER));
             headers.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-            // 登录连接用用户粘贴的完整 Cookie；游客连接只带 buvid 降低风控概率。
-            let cookie_value = if let Some(auth) = bili_auth.as_ref() {
-                Some(auth.cookie.clone())
-            } else {
-                buvid
-                    .as_deref()
-                    .map(|b| format!("buvid3={b}"))
-            };
+            // 登录连接只发 SESSDATA（删掉 buvid3/buvid4/sid/DedeUserID 等，
+            // 避免与鉴权包字段或服务端设备指纹校验冲突而被 RST）；
+            // 游客连接只带新取的 buvid 降低风控概率。
+            let cookie_value = sessdata
+                .as_deref()
+                .map(|s| format!("SESSDATA={s}"))
+                .or_else(|| buvid.as_deref().map(|b| format!("buvid3={b}")));
             if let Some(cookie) = cookie_value {
                 if let Ok(value) = HeaderValue::from_str(&cookie) {
                     headers.insert("Cookie", value);
@@ -444,9 +459,12 @@ mod imp {
         .map_err(|_| "连接弹幕服务器超时".to_string())?
         .map_err(|e| format!("连接弹幕服务器失败：{e}"))?;
 
-        // 4. 鉴权：uid 用登录账号的真实 uid（游客为 0）
+        // 4. 鉴权：uid 固定 0。登录态完全由 Cookie 里的 SESSDATA 传递，
+        //    服务端鉴权通过后会在弹幕里下发真实 uid 与昵称；填 DedeUserID
+        //    反而会因身份/token 不匹配触发风控。
+        //    buvid 仅在游客连接时带（与上面的 Cookie 头一致）。
         let auth = serde_json::json!({
-            "uid": login_uid,
+            "uid": 0,
             "roomid": real_room_id,
             "protover": 2,
             "platform": "web",
@@ -833,6 +851,14 @@ mod imp {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
+    }
+
+    /// 敏感字符串的短哈希，仅用于连接签名对比，绝不打印原文。
+    fn short_hash(s: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
     }
 
     fn as_i64(value: &Value) -> Option<i64> {

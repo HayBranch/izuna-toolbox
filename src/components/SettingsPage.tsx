@@ -253,6 +253,7 @@ function DeveloperTab({
 
   // ---- B 站登录态（真实 uid / 昵称）----
   const biliUid = settings?.biliUid ?? 0;
+  const biliLoggedIn = settings?.biliLoggedIn ?? false;
   const [cookieInput, setCookieInput] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginNote, setLoginNote] = useState("");
@@ -271,7 +272,9 @@ function DeveloperTab({
       onSettings(next);
       setCookieInput("");
       setLoginNote(
-        `已登录 uid=${next.biliUid}，弹幕连接已用登录态重连，可获取真实 uid/昵称。`,
+        next.biliUid > 0
+          ? `已登录（uid ${next.biliUid}），弹幕连接已用登录态重连，可获取真实 uid/昵称。`
+          : "已登录，弹幕连接已用登录态重连，可获取真实 uid/昵称（真实 uid 由服务端随弹幕下发）。",
       );
     } catch (e) {
       setLoginError(errorText(e));
@@ -442,25 +445,30 @@ function DeveloperTab({
           游客连接时，B 站会把弹幕的 uid 全部改成 0、昵称打码（如 <code>泉***</code>
           ），工具无法反查真实身份。登录后服务端会下发真实 uid 与完整昵称，多个游客
           弹幕也不再被误当成同一个人。Cookie 只存本机 <code>conf/auth.toml</code>
-          ，不进配置备份、不写日志。
+          ，不进配置备份、不写日志。连接弹幕服务器时<strong>只发送 SESSDATA</strong>
+          （不会发送完整 Cookie），其余字段仅留作存档——带 buvid/sid 等字段会让服务端
+          判定设备指纹不一致，直接断开连接。
         </p>
 
         <div className="mt-3 flex items-center gap-2 text-sm">
           <span
             className={`inline-block h-2 w-2 rounded-full ${
-              biliUid > 0 ? "bg-emerald-500" : "bg-slate-400"
+              biliLoggedIn ? "bg-emerald-500" : "bg-slate-400"
             }`}
           />
-          <span className={biliUid > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}>
-            {biliUid > 0 ? `已登录 · uid ${biliUid}` : "未登录 · 游客连接"}
+          <span className={biliLoggedIn ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}>
+            {biliLoggedIn
+              ? biliUid > 0
+                ? `已登录 · uid ${biliUid}`
+                : "已登录 · 真实 uid 由服务端下发"
+              : "未登录 · 游客连接"}
           </span>
         </div>
 
         <div className="mt-3">
           <label className="block text-xs text-slate-500 dark:text-slate-400">
-            从已登录 B 站的浏览器复制整条 Cookie 粘贴到下方（需包含{" "}
-            <code className="font-mono">DedeUserID</code> 与{" "}
-            <code className="font-mono">SESSDATA</code>）：
+            从已登录 B 站的浏览器复制整条 Cookie 粘贴到下方（必须包含{" "}
+            <code className="font-mono">SESSDATA</code>，其它字段可有可无）：
           </label>
           <textarea
             value={cookieInput}

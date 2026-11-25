@@ -51,8 +51,11 @@ pub struct SettingsInfo {
     pub log_level: String,
     pub conf_path: String,
     pub log_dir: String,
-    /// B 站登录 uid；>0 表示已配置登录态，0 表示游客连接（弹幕 uid 会被打码成 0）。
+    /// B 站登录 uid。>0 来自 DedeUserID；0 可能是游客，也可能是只有 SESSDATA 的登录态，
+    /// 判断是否登录请统一看 bili_logged_in。
     pub bili_uid: i64,
+    /// 是否已配置有效的 B 站登录态（存在 SESSDATA）。界面用它显示登录状态。
+    pub bili_logged_in: bool,
 }
 
 /// 本地私有凭据文件：conf/auth.toml 的内容。用 TOML 表结构，方便以后扩展
@@ -74,10 +77,14 @@ struct AuthBili {
 /// 只存在内存与 `conf/auth.toml`，不进 conf.toml、不写日志、不参与备份。
 #[derive(Debug, Clone)]
 pub struct BiliAuth {
-    /// 登录账号 uid（来自 DedeUserID）
+    /// 登录账号 uid（来自 DedeUserID，仅用于界面展示/连接签名）
     pub uid: i64,
-    /// 发往弹幕服务器的完整 Cookie 头（含 SESSDATA / buvid3 等）
+    /// 用户粘贴的完整 Cookie（原样存档，便于以后扩展）
     pub cookie: String,
+    /// 从完整 Cookie 中提取的 SESSDATA 值。
+    /// 弹幕 WebSocket 只发这一个字段：带上 buvid3/buvid4/sid 等会让服务端
+    /// 拿 Cookie 里的设备指纹和鉴权包的 buvid 对比，不一致会被直接 RST。
+    pub sessdata: String,
 }
 
 pub struct LoadedConfig {
@@ -140,8 +147,13 @@ impl SettingsState {
         }
         if let Ok(mut guard) = self.inner.lock() {
             guard.bili_uid = auth.uid;
+            guard.bili_logged_in = true;
         }
-        log::info!("[B站登录] 已保存登录态 uid={}，凭据文件 {}", auth.uid, path.display());
+        log::info!(
+            "[B站登录] 已保存登录态 uid={}（仅 SESSDATA 会发给弹幕服务器），凭据文件 {}",
+            auth.uid,
+            path.display()
+        );
         Ok(self.get())
     }
 
@@ -159,6 +171,7 @@ impl SettingsState {
         }
         if let Ok(mut guard) = self.inner.lock() {
             guard.bili_uid = 0;
+            guard.bili_logged_in = false;
         }
         log::info!("[B站登录] 已清除登录态，队列将使用游客连接");
         Ok(self.get())
@@ -302,6 +315,7 @@ pub fn load(exe_dir: &Path) -> LoadedConfig {
         conf_path: path.display().to_string(),
         log_dir: log_dir.display().to_string(),
         bili_uid: bili_auth.as_ref().map(|a| a.uid).unwrap_or(0),
+        bili_logged_in: bili_auth.is_some(),
     };
 
     LoadedConfig {
@@ -362,6 +376,7 @@ fn fallback_settings() -> SettingsInfo {
         conf_path: String::new(),
         log_dir: String::new(),
         bili_uid: 0,
+        bili_logged_in: false,
     }
 }
 
@@ -452,31 +467,37 @@ fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
         return Err("Cookie 为空，请从已登录的 B 站页面复制完整 Cookie".into());
     }
     let mut uid: Option<i64> = None;
-    let mut has_sessdata = false;
+    let mut sessdata = String::new();
     for pair in cookie.split(';') {
         let pair = pair.trim();
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        // 值可能带引号（从某些抓包工具复制时会出现），一并去掉。
+        let value = value.trim().trim_matches('"').trim();
         match key.trim() {
             "DedeUserID" => {
-                // 值可能带引号（从某些抓包工具复制时会出现），一并去掉。
-                let v = value.trim().trim_matches('"').trim();
-                uid = v.parse::<i64>().ok().filter(|id| *id > 0);
+                uid = value.parse::<i64>().ok().filter(|id| *id > 0);
             }
             "SESSDATA" => {
-                has_sessdata = !value.trim().trim_matches('"').trim().is_empty();
+                if !value.is_empty() {
+                    sessdata = value.to_string();
+                }
             }
             _ => {}
         }
     }
-    let uid = uid.ok_or(
-        "Cookie 中缺少有效的 DedeUserID（用户 uid）。请确认复制的是已登录 B 站账号的完整 Cookie，且不要缺字段",
-    )?;
-    if !has_sessdata {
+    if sessdata.is_empty() {
         return Err("Cookie 中缺少 SESSDATA，请先登录 B 站再复制完整 Cookie".into());
     }
-    Ok(BiliAuth { uid, cookie })
+    // DedeUserID 只用于界面展示和连接签名，缺失也能登录：真实 uid 由服务端
+    // 在鉴权成功后随弹幕下发，不依赖它。缺失时用 0（游客显示）不影响计数。
+    let uid = uid.unwrap_or(0);
+    Ok(BiliAuth {
+        uid,
+        cookie,
+        sessdata,
+    })
 }
 
 fn default_log_level() -> String {
@@ -547,19 +568,34 @@ mod tests {
         let raw = "buvid3=ABC; DedeUserID=123456; SESSDATA=abc%2Fdef; bili_jct=token; sid=xyz";
         let auth = parse_bili_cookie(raw).unwrap();
         assert_eq!(auth.uid, 123456);
+        assert_eq!(auth.sessdata, "abc%2Fdef");
         assert_eq!(auth.cookie, raw);
     }
 
     #[test]
     fn parse_bili_cookie_rejects_guest_or_incomplete_cookie() {
-        // 游客 Cookie：没有 DedeUserID / SESSDATA
+        // 游客 Cookie：没有 SESSDATA
         assert!(parse_bili_cookie("buvid3=ABC; bili_jct=token").is_err());
-        // 有 uid 但缺 SESSDATA
+        // 缺 SESSDATA
         assert!(parse_bili_cookie("DedeUserID=123").is_err());
-        // uid 非法
-        assert!(parse_bili_cookie("DedeUserID=abc; SESSDATA=x").is_err());
         // 空
         assert!(parse_bili_cookie("   ").is_err());
+    }
+
+    #[test]
+    fn parse_bili_cookie_without_dedeuserid_still_logs_in() {
+        // 有些环境复制到的 Cookie 只有 SESSDATA，没有 DedeUserID；
+        // 真实 uid 由服务端下发，本地 uid=0 只影响显示，不能因此拒绝登录。
+        let auth = parse_bili_cookie("SESSDATA=only_sess; buvid3=ABC").unwrap();
+        assert_eq!(auth.uid, 0);
+        assert_eq!(auth.sessdata, "only_sess");
+        // uid 字段非法时同样降级为 0，而不是报「缺少 DedeUserID」
+        assert_eq!(
+            parse_bili_cookie("DedeUserID=abc; SESSDATA=x")
+                .unwrap()
+                .uid,
+            0
+        );
     }
 
     #[test]
