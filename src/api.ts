@@ -196,6 +196,9 @@ export const saveLogLevel = (level: LogLevel) =>
 /** 恢复默认设置（外观 auto + 日志 error；不影响 SQLite 数据） */
 export const resetSettings = () => invoke<SettingsInfo>("reset_settings");
 
+/** 打开 exe 同目录的 logs/（排查弹幕连接用），返回日志目录绝对路径 */
+export const openLogDir = () => invoke<string>("open_log_dir");
+
 /** 导出到本地路径（includeData=false 时只导出 conf.toml） */
 export const exportLocal = (path: string, includeData: boolean) =>
   invoke<string>("export_local", { path, includeData });

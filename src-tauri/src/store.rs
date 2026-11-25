@@ -2345,4 +2345,80 @@ mod queue_tests {
         let _ = std::fs::remove_file(db.with_extension("db-shm"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 回归：多个队列同时监听时，命中写入必须严格按 queue_id 隔离，
+    /// 不能出现「A 的弹幕记到 B」「一个队列停住另一个也不计数」这类串扰。
+    #[test]
+    fn multi_queue_matches_are_isolated() {
+        let dir = std::env::temp_dir().join(format!("izuna_multi_queue_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+
+        let id_a = store.next_queue_id();
+        store.push_queue(&default_queue(id_a, now_ms())).unwrap();
+        let id_b = store.next_queue_id();
+        store.push_queue(&default_queue(id_b, now_ms())).unwrap();
+        assert_ne!(id_a, id_b);
+
+        let base = now_ms() - 5_000;
+        // 两个队列各自写入，且共用同一个 uid：计数与昵称都应各自独立
+        assert_eq!(
+            store
+                .record_queue_matches(id_a, &[(1001, "阿一".into(), base)])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .record_queue_matches(id_b, &[(1001, "阿一".into(), base)])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .record_queue_matches(id_a, &[(1001, "阿一改名".into(), base + 1)])
+                .unwrap(),
+            1
+        );
+
+        let all = store.get().queues;
+        let qa = all.iter().find(|q| q.id == id_a).unwrap();
+        let qb = all.iter().find(|q| q.id == id_b).unwrap();
+        assert_eq!(qa.entries.len(), 1);
+        assert_eq!(qb.entries.len(), 1);
+        let ea = qa.entries.iter().find(|e| e.uid == 1001).unwrap();
+        let eb = qb.entries.iter().find(|e| e.uid == 1001).unwrap();
+        assert_eq!(ea.count, 2);
+        assert_eq!(eb.count, 1, "队列 B 不应被队列 A 的写入影响");
+        assert_eq!(ea.nickname, "阿一改名");
+        assert_eq!(eb.nickname, "阿一", "队列 B 的昵称不应被队列 A 覆盖");
+
+        // 删除其中一个队列，另一个仍应正常计数（模拟用户「删除重开」）
+        store.delete_queue(id_a).unwrap();
+        assert_eq!(
+            store
+                .record_queue_matches(id_a, &[(1002, "已删队列".into(), base)])
+                .unwrap(),
+            0,
+            "已删除队列的命中应被安全忽略"
+        );
+        assert_eq!(
+            store
+                .record_queue_matches(id_b, &[(1001, "阿一".into(), base + 2)])
+                .unwrap(),
+            1
+        );
+        let qb = store.get_queue(id_b).unwrap();
+        let all = store.get().queues;
+        let qb_entries = &all.iter().find(|q| q.id == id_b).unwrap().entries;
+        assert_eq!(qb.id, id_b);
+        assert_eq!(qb_entries.iter().find(|e| e.uid == 1001).unwrap().count, 2);
+
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

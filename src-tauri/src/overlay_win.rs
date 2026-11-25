@@ -137,11 +137,15 @@ pub fn apply_window_state(
             .set_position(PhysicalPosition::new(cfg.x, cfg.y))
             .map_err(warn("设置浮窗位置失败"))?;
     }
-    // show() 不会抢焦点（区别于 set_focus），适合直播场景；
-    // 但只在量好尺寸后才 show，未量好之前保持隐藏
+    // show() 不会抢焦点（区别于 set_focus），适合直播场景。
+    // 自动尺寸必须等量好内容后才 show；手动宽高已经是有效尺寸，重启后可直接恢复，
+    // 不能等一个在手动模式下不会发生的自动测量，否则显示开关会永远无效。
     if cfg.shown {
-        if is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
+        let has_manual_size = cfg.width > 0 && cfg.height > 0;
+        if has_manual_size || is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
             window.show().map_err(warn("显示浮窗失败"))?;
+        } else {
+            log::debug!("浮窗 #{} 等待首次内容测量后显示", cfg.id);
         }
     } else {
         window.hide().map_err(warn("隐藏浮窗失败"))?;

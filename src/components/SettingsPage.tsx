@@ -12,6 +12,7 @@ import {
   applyBackup,
   exportLocal,
   exportWebdav,
+  openLogDir,
   openUrl,
   resetSettings,
   saveLogLevel,
@@ -245,6 +246,8 @@ function DeveloperTab({
   const current = settings?.logLevel ?? "error";
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [diagBusy, setDiagBusy] = useState(false);
+  const [diagNote, setDiagNote] = useState("");
 
   // ---- 更新后自动启动自检 ----
   const [testing, setTesting] = useState(false);
@@ -313,6 +316,28 @@ function DeveloperTab({
     }
   };
 
+  // 一键排查：把日志等级提到 info（连接过程/写入/重连都会落盘），
+  // 再打开 logs/ 目录让用户直接拿文件。error 是默认值，看不到这些记录。
+  const startDanmakuDiag = async () => {
+    setDiagBusy(true);
+    setError("");
+    setDiagNote("");
+    try {
+      if (!["info", "debug", "trace"].includes(current)) {
+        const next = await saveLogLevel("info");
+        onSettings(next);
+      }
+      const dir = await openLogDir();
+      setDiagNote(
+        `已开启 info 日志并打开日志目录：${dir}。复现问题后把当天日志发来即可；排完记得把等级调回 error。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setDiagBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <section className={CARD}>
@@ -359,6 +384,32 @@ function DeveloperTab({
         {error && (
           <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
             {error}
+          </p>
+        )}
+      </section>
+
+      <section className={CARD}>
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          弹幕连接排查
+        </h3>
+        <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+          队列计数卡住、弹幕连不上时，点下面按钮把日志等级临时调到
+          <code className="font-mono"> info </code>并打开 logs/ 目录。日志按天分文件，
+          每条弹幕记录都带 <code className="font-mono">queue_id</code>、
+          <code className="font-mono">room</code>（直播间号）与真实房间号，可按队列分别排查：
+          连接各阶段、鉴权结果、每分钟活跃统计（收包/弹幕/命中/重复/写入）、断线重连与错误原因都会落盘。
+        </p>
+        <button
+          type="button"
+          disabled={diagBusy}
+          onClick={() => void startDanmakuDiag()}
+          className={`mt-4 ${BTN_PRIMARY}`}
+        >
+          {diagBusy ? "正在开启…" : "开启详细日志并打开日志目录"}
+        </button>
+        {diagNote && (
+          <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            {diagNote}
           </p>
         )}
       </section>

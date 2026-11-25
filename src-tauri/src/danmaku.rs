@@ -46,7 +46,7 @@ pub fn reconcile(app: &AppHandle) {
 mod imp {
     use std::collections::{HashMap, VecDeque};
     use std::io::Read;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -86,22 +86,60 @@ mod imp {
                     desired.insert(q.id, format!("{}:{}", q.room_id, q.poll_secs));
                 }
             }
+            log::info!(
+                "[弹幕] reconcile：数据库队列 {} 个，需监听 {} 个（enabled 且有直播间号）",
+                queues.len(),
+                desired.len()
+            );
 
-            // 1. 停掉已删除 / 已暂停 / 房间或间隔变了的任务
-            if let Ok(mut workers) = self.workers.lock() {
-                for (id, w) in workers.iter() {
-                    if desired.get(id) != Some(&w.signature) {
-                        w.cancel.store(true, Ordering::Relaxed);
+            // 一次持有 workers 锁，原子完成「停旧 + 占位新」。
+            // 旧实现把 insert 放在释放锁之后，两次并发 reconcile 会给同一队列
+            // 启动两个连接（多队列 + 同一直播间时更容易暴露），导致重复计数、
+            // 互相抢 token / 被服务端踢下线。占位与检查必须在同一临界区。
+            let mut spawned: Vec<(QueueConfig, Arc<AtomicBool>)> = Vec::new();
+            match self.workers.lock() {
+                Ok(mut workers) => {
+                    for (id, w) in workers.iter() {
+                        if desired.get(id) != Some(&w.signature) {
+                            log::info!(
+                                "[弹幕] reconcile：停止队列 #{id} 的监听（配置变化 / 暂停 / 删除）"
+                            );
+                            w.cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    workers.retain(|id, w| desired.get(id) == Some(&w.signature));
+                    for q in queues {
+                        let Some(signature) = desired.get(&q.id) else {
+                            continue;
+                        };
+                        if workers.contains_key(&q.id) {
+                            continue;
+                        }
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        workers.insert(
+                            q.id,
+                            WorkerHandle {
+                                signature: signature.clone(),
+                                cancel: cancel.clone(),
+                            },
+                        );
+                        log::info!(
+                            "[弹幕] reconcile：为队列 #{} room={} 启动监听任务",
+                            q.id,
+                            q.room_id
+                        );
+                        spawned.push((q.clone(), cancel));
                     }
                 }
-                workers.retain(|id, w| desired.get(id) == Some(&w.signature));
+                Err(_) => return,
             }
 
-            // 2. 状态表：删除已不存在的队列；未启用的显示原因
+            // 状态表：删除已不存在的队列；未启用的显示原因；刚启动的清空旧错误
             if let Ok(mut status) = self.status.lock() {
                 status.retain(|id, _| queues.iter().any(|q| q.id == *id));
                 for q in queues {
-                    if !q.enabled || q.room_id <= 0 {
+                    let just_spawned = spawned.iter().any(|(s, _)| s.id == q.id);
+                    if !desired.contains_key(&q.id) {
                         let s = status
                             .entry(q.id)
                             .or_insert_with(|| QueueStatus {
@@ -110,58 +148,40 @@ mod imp {
                             });
                         s.connected = false;
                         s.last_error = if q.room_id <= 0 {
+                            log::info!(
+                                "[弹幕] reconcile：队列 #{} room={} 未启动（未设置直播间号）",
+                                q.id,
+                                q.room_id
+                            );
                             "未设置直播间号".into()
                         } else {
+                            log::info!(
+                                "[弹幕] reconcile：队列 #{} room={} 未启动（已暂停监听）",
+                                q.id,
+                                q.room_id
+                            );
                             "已暂停监听".into()
                         };
                         if q.room_id <= 0 {
                             s.real_room_id = 0;
                         }
                         s.updated_at = now_ms();
+                    } else if just_spawned {
+                        let s = status
+                            .entry(q.id)
+                            .or_insert_with(|| QueueStatus {
+                                queue_id: q.id,
+                                ..Default::default()
+                            });
+                        s.connected = false;
+                        s.last_error.clear();
+                        s.real_room_id = 0;
+                        s.updated_at = now_ms();
                     }
                 }
             }
 
-            // 3. 启动新任务
-            let mut spawned = Vec::new();
-            {
-                let workers = match self.workers.lock() {
-                    Ok(w) => w,
-                    Err(_) => return,
-                };
-                for q in queues {
-                    let Some(signature) = desired.get(&q.id) else {
-                        continue;
-                    };
-                    if workers.contains_key(&q.id) {
-                        continue;
-                    }
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    spawned.push((q.clone(), signature.clone(), cancel));
-                }
-            }
-            for (q, signature, cancel) in spawned {
-                if let Ok(mut workers) = self.workers.lock() {
-                    workers.insert(
-                        q.id,
-                        WorkerHandle {
-                            signature,
-                            cancel: cancel.clone(),
-                        },
-                    );
-                }
-                if let Ok(mut status) = self.status.lock() {
-                    let s = status
-                        .entry(q.id)
-                        .or_insert_with(|| QueueStatus {
-                            queue_id: q.id,
-                            ..Default::default()
-                        });
-                    s.connected = false;
-                    s.last_error.clear();
-                    s.real_room_id = 0;
-                    s.updated_at = now_ms();
-                }
+            for (q, cancel) in spawned {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     run_worker(app, q, cancel).await;
@@ -192,44 +212,95 @@ mod imp {
     }
 
     async fn run_worker(app: AppHandle, queue: QueueConfig, cancel: Arc<AtomicBool>) {
-        let client = match reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(12))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                set_error(&app, queue.id, format!("初始化网络失败：{e}"));
-                return;
+        let queue_id = queue.id;
+        log::info!(
+            "[弹幕] queue_id={queue_id} room={} name={:?} 监听任务启动，刷新间隔={}s，规则数={}",
+            queue.room_id,
+            queue.name,
+            queue.poll_secs,
+            queue.patterns.len()
+        );
+
+        // 客户端初始化失败也不能直接结束任务：workers 表仍保留句柄，直接 return
+        // 会让这个队列永远不再重连，暂停/恢复之外的开关看起来也像“卡死”。
+        let client = loop {
+            match reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .timeout(Duration::from_secs(12))
+                .build()
+            {
+                Ok(client) => break client,
+                Err(e) => {
+                    let error = format!("初始化网络失败：{e}");
+                    log::error!("[弹幕] queue_id={queue_id} room={} {error}；10 秒后重试", queue.room_id);
+                    set_error(&app, queue_id, error);
+                    if wait_for_retry(&cancel, Duration::from_secs(10)).await {
+                        patch_status(&app, queue_id, |s| s.connected = false);
+                        log::info!("[弹幕] queue_id={queue_id} 监听任务已停止");
+                        return;
+                    }
+                }
             }
         };
 
         let mut host_turn = 0usize;
+        let mut attempt = 0u64;
+        // 跨连接保留待写入弹幕：旧实现把它放在 stream_once 内，连接在两次刷新
+        // 之间断开时，本批命中会随局部变量一起丢失。
+        let mut pending: Vec<(i64, String, i64)> = Vec::new();
         while !cancel.load(Ordering::Relaxed) {
-            patch_status(&app, queue.id, |s| {
+            attempt += 1;
+            patch_status(&app, queue_id, |s| {
                 s.connected = false;
                 s.last_error.clear();
             });
-            let backoff = match stream_once(&app, &client, &queue, &mut host_turn, &cancel).await {
-                Ok(()) => Duration::from_secs(3),
+            log::info!(
+                "[弹幕] queue_id={queue_id} room={} 开始第 {attempt} 次连接，待写入={} ",
+                queue.room_id,
+                pending.len()
+            );
+            let backoff = match stream_once(
+                &app,
+                &client,
+                &queue,
+                &mut host_turn,
+                &cancel,
+                &mut pending,
+            )
+            .await
+            {
+                Ok(()) => {
+                    log::info!("[弹幕] queue_id={queue_id} room={} 本次连接结束", queue.room_id);
+                    Duration::from_secs(3)
+                }
                 Err(e) => {
-                    set_error(&app, queue.id, e);
+                    log::error!(
+                        "[弹幕] queue_id={queue_id} room={} 连接失败：{e}；6 秒后重连，保留待写入={} ",
+                        queue.room_id,
+                        pending.len()
+                    );
+                    set_error(&app, queue_id, e);
                     Duration::from_secs(6)
                 }
             };
-            if cancel.load(Ordering::Relaxed) {
+            if wait_for_retry(&cancel, backoff).await {
                 break;
             }
-            // 分片睡眠，暂停/改配置时能尽快退出
-            let until = tokio::time::Instant::now() + backoff;
-            while tokio::time::Instant::now() < until {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(400)).await;
-            }
         }
-        patch_status(&app, queue.id, |s| s.connected = false);
+        patch_status(&app, queue_id, |s| s.connected = false);
+        log::info!("[弹幕] queue_id={queue_id} room={} 监听任务已停止", queue.room_id);
+    }
+
+    /// 分片等待重连；返回 true 表示期间收到取消，可尽快结束任务。
+    async fn wait_for_retry(cancel: &Arc<AtomicBool>, duration: Duration) -> bool {
+        let until = tokio::time::Instant::now() + duration;
+        while tokio::time::Instant::now() < until {
+            if cancel.load(Ordering::Relaxed) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        cancel.load(Ordering::Relaxed)
     }
 
     /// 连接一次并持续接收；连接断开时返回错误，由 run_worker 决定重连。
@@ -239,6 +310,7 @@ mod imp {
         queue: &QueueConfig,
         host_turn: &mut usize,
         cancel: &Arc<AtomicBool>,
+        pending: &mut Vec<(i64, String, i64)>,
     ) -> Result<(), String> {
         let queue_id = queue.id;
 
@@ -357,10 +429,14 @@ mod imp {
         );
 
         let mut patterns = compile_patterns(&queue.patterns);
-        let mut pending: Vec<(i64, String, i64)> = Vec::new();
         let mut seen: VecDeque<(String, std::time::Instant)> = VecDeque::new();
         let mut connected = false;
         let mut last_message_written = 0i64;
+        let mut received_frames = 0u64;
+        let mut received_danmaku = 0u64;
+        let mut matched = 0u64;
+        let mut duplicates = 0u64;
+        let mut written = 0u64;
 
         let flush_secs = queue.poll_secs.clamp(1, 60) as u64;
         let mut flush_tick = tokio::time::interval(Duration::from_secs(flush_secs));
@@ -370,6 +446,12 @@ mod imp {
         let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await;
+
+        // 即使一直没有命中，也每分钟留下一条活跃度日志，便于区分
+        // “连接正常但没匹配”与“连接已悄悄停住”。
+        let mut stats_tick = tokio::time::interval(Duration::from_secs(60));
+        stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        stats_tick.tick().await;
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -389,29 +471,54 @@ mod imp {
                         .get_queue(queue_id)
                     {
                         if !latest.enabled {
+                            log::info!("[弹幕] queue_id={queue_id} 队列已暂停，结束当前连接");
                             return Ok(());
                         }
                         patterns = compile_patterns(&latest.patterns);
                     }
                     if !pending.is_empty() {
-                        let hits = std::mem::take(&mut pending);
+                        let hits = std::mem::take(pending);
                         let store = app.state::<Arc<Store>>();
                         match store.record_queue_matches(queue_id, &hits) {
                             Ok(n) if n > 0 => {
-                                let _ = app.emit(
-                                    crate::commands::CONFIG_CHANGED_EVENT,
-                                    store.get(),
+                                written += n as u64;
+                                log::info!(
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 本批写入={n}，累计写入={written}"
                                 );
+                                schedule_broadcast(app);
                             }
-                            Ok(_) => {}
-                            Err(e) => log::error!("队列 #{queue_id} 写入排队队列失败：{e}"),
+                            Ok(_) => {
+                                log::debug!("[弹幕] queue_id={queue_id} 队列已删除，丢弃本批 {} 条命中", hits.len());
+                            }
+                            Err(e) => {
+                                // 数据库暂时失败不能吃掉整批弹幕：恢复旧批次并保留
+                                // 写入期间新到的弹幕，下一个刷新周期一起重试。
+                                log::error!(
+                                    "[弹幕] queue_id={queue_id} 写入 SQLite 失败：{e}；{} 条命中将在下周期重试",
+                                    hits.len()
+                                );
+                                let mut retry = hits;
+                                retry.append(pending);
+                                *pending = retry;
+                            }
                         }
                     }
+                }
+                _ = stats_tick.tick() => {
+                    log::info!(
+                        "[弹幕] queue_id={queue_id} room={real_room_id} 活跃统计：收包={received_frames}，弹幕={received_danmaku}，命中={matched}，重复={duplicates}，已写入={written}，待写入={}",
+                        pending.len()
+                    );
                 }
                 msg = tokio::time::timeout(Duration::from_secs(75), ws.next()) => {
                     let msg = msg.map_err(|_| "弹幕服务器长时间无响应".to_string())?;
                     match msg {
                         Some(Ok(Message::Binary(data))) => {
+                            received_frames += 1;
+                            log::trace!(
+                                "[弹幕] queue_id={queue_id} room={real_room_id} 收到二进制帧，字节数={}",
+                                data.len()
+                            );
                             let mut decoded = Vec::new();
                             if let Err(e) = decode_frame(&data, &mut decoded) {
                                 return Err(format!("解析弹幕包失败：{e}"));
@@ -427,7 +534,11 @@ mod imp {
                                         s.connected = true;
                                         s.last_error.clear();
                                     });
-                                    log::info!("队列 #{queue_id} 房间 {real_room_id}：弹幕鉴权成功，开始接收消息");
+                                    log::info!("[弹幕] queue_id={queue_id} room={real_room_id} 鉴权成功，开始接收消息");
+                                    continue;
+                                }
+                                if op == 3 {
+                                    log::trace!("[弹幕] queue_id={queue_id} room={real_room_id} 收到服务端心跳响应");
                                     continue;
                                 }
                                 if op != 5 {
@@ -443,6 +554,7 @@ mod imp {
                                 let Some((uid, nickname, text, at)) = parse_danmaku(&value) else {
                                     continue;
                                 };
+                                received_danmaku += 1;
                                 let now = now_ms();
                                 if now - last_message_written >= 1000 {
                                     last_message_written = now;
@@ -456,21 +568,33 @@ mod imp {
                                 }
                                 let key = format!("{uid}:{at}:{text}");
                                 if is_duplicate(&mut seen, key) {
+                                    duplicates += 1;
+                                    log::debug!("[弹幕] queue_id={queue_id} 忽略重复弹幕：uid={uid} at={at} text={text:?}");
                                     continue;
                                 }
+                                matched += 1;
+                                log::debug!(
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中：uid={uid} nickname={nickname:?} text={text:?}，待写入={}",
+                                    pending.len() + 1
+                                );
                                 pending.push((uid, nickname, at));
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
-                            let _ = ws.send(Message::Pong(payload)).await;
+                            ws.send(Message::Pong(payload))
+                                .await
+                                .map_err(|e| format!("回复 WebSocket Ping 失败：{e}"))?;
+                            log::trace!("[弹幕] queue_id={queue_id} 已回复 WebSocket Pong");
                         }
-                        Some(Ok(Message::Close(_))) => {
-                            log::warn!("队列 #{queue_id}：弹幕服务器关闭了连接");
+                        Some(Ok(Message::Close(frame))) => {
+                            log::warn!("[弹幕] queue_id={queue_id} room={real_room_id} 服务端关闭连接：{frame:?}");
                             return Err("弹幕服务器关闭了连接".into());
                         }
-                        Some(Ok(_)) => {}
+                        Some(Ok(other)) => {
+                            log::debug!("[弹幕] queue_id={queue_id} 忽略非二进制 WebSocket 消息：{other:?}");
+                        }
                         Some(Err(e)) => {
-                            log::warn!("队列 #{queue_id} 弹幕连接中断：{e}");
+                            log::warn!("[弹幕] queue_id={queue_id} room={real_room_id} WebSocket 接收错误：{e}");
                             return Err(format!("弹幕连接中断：{e}"));
                         }
                         None => return Err("弹幕连接已断开".into()),
@@ -478,6 +602,55 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// 广播请求序号：多队列同一刷新周期内的写入合并成一次全量广播。
+    static BROADCAST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// 名单写入成功后安排一次「合并广播」，**不阻塞弹幕接收循环**。
+    ///
+    /// 早期版本在 `flush_tick` 分支里同步组装全量配置并逐个窗口派发事件：
+    /// 一旦某个 WebView / 主线程卡住，本队列的 `ws.next()` 就不再被轮询，
+    /// 表现为「计数一次后停住」，还会连带拖慢其它队列。
+    /// 现在接收循环只递增一个原子序号并投递后台任务；后台任务等一小段时间
+    /// 合并同批写入，只有序号最新的那次真正广播。广播失败只记日志，
+    /// 绝不回流到弹幕连接或数据库写入链路。
+    fn schedule_broadcast(app: &AppHandle) {
+        let seq = BROADCAST_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        let app = app.clone();
+        // 在投递任务之前就取到 owned 的 Arc<Store>：异步块里不持有 State 借用，
+        // 保证 future 满足 Send + 'static。
+        let store: Option<Arc<Store>> = app
+            .try_state::<Arc<Store>>()
+            .map(|s| (*s).clone());
+        tauri::async_runtime::spawn(async move {
+            // 合并窗口：让同一刷新周期内多个队列的写入只触发一次全量推送
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            if BROADCAST_SEQ.load(Ordering::Relaxed) != seq {
+                return; // 已有更新的广播请求，交给它
+            }
+            let Some(store) = store else {
+                log::warn!("[弹幕] 广播时 Store 状态不可用，跳过本次推送");
+                return;
+            };
+            let config = store.get();
+            log::debug!("[弹幕] 推送最新名单（第 {seq} 次广播）");
+            // 弹幕只改队列名单：主窗口 + 所有 queue-* 弹窗需要刷新，
+            // 字幕浮窗内容不受影响，不必骚扰。逐窗口独立发送 + 独立记录，
+            // 单个窗口异常不会中断其它窗口，更不会回流到任何弹幕连接。
+            for label in app.webview_windows().keys() {
+                if label != "main" && !label.starts_with(crate::queue_win::LABEL_PREFIX) {
+                    continue;
+                }
+                if let Err(e) = app.emit_to(
+                    label.as_str(),
+                    crate::commands::CONFIG_CHANGED_EVENT,
+                    &config,
+                ) {
+                    log::warn!("[弹幕] 向窗口 {label} 推送名单失败：{e}");
+                }
+            }
+        });
     }
 
     fn patch_status(app: &AppHandle, queue_id: i64, f: impl FnOnce(&mut QueueStatus)) {

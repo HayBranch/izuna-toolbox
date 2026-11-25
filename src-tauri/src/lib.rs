@@ -264,6 +264,7 @@ pub fn run() {
             settings_cmd::set_theme,
             settings_cmd::set_log_level,
             settings_cmd::reset_settings,
+            settings_cmd::open_log_dir,
             settings_cmd::export_local,
             settings_cmd::export_webdav,
             settings_cmd::select_local_backup,

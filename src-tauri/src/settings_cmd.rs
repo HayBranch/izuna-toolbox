@@ -8,6 +8,7 @@
 //! 2. 前端让用户选择「覆盖 / 增量」后，`apply_backup` 才真正写数据库和 conf.toml。
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -40,6 +41,23 @@ pub fn set_log_level(
     level: String,
 ) -> Result<SettingsInfo, String> {
     settings.set_log_level(&level)
+}
+
+/// 排查弹幕连接时，用系统文件管理器打开 exe 同目录的 logs/，并把目录路径
+/// 回给前端展示。日志等级默认 error，连接过程日志基本不可见；设置页的
+/// 「弹幕连接排查」会先把等级调到 info 再调这个命令，让用户直接拿到日志文件。
+#[tauri::command]
+pub fn open_log_dir(settings: State<'_, SettingsState>) -> Result<String, String> {
+    let dir = PathBuf::from(settings.get().log_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开日志目录失败：{e}"))?;
+    }
+    Ok(dir.display().to_string())
 }
 
 #[tauri::command]

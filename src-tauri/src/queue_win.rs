@@ -116,8 +116,14 @@ pub fn apply_queue_window_state(
             .map_err(warn("设置排队弹窗位置失败"))?;
     }
     if cfg.shown {
-        if is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
+        // 手动宽高本身就是已知的有效尺寸，不需要再等前端自动测量。
+        // 否则重启后前端因 manual=true 跳过 ResizeObserver，Rust 又一直等 measured，
+        // 两边互相等待，表现为弹窗永远隐藏、显示开关无效，只能删除重建。
+        let has_manual_size = cfg.width > 0 && cfg.height > 0;
+        if has_manual_size || is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
             window.show().map_err(warn("显示排队弹窗失败"))?;
+        } else {
+            log::debug!("排队弹窗 #{} 等待首次内容测量后显示", cfg.id);
         }
     } else {
         window.hide().map_err(warn("隐藏排队弹窗失败"))?;
