@@ -437,6 +437,14 @@ mod imp {
         let mut matched = 0u64;
         let mut duplicates = 0u64;
         let mut written = 0u64;
+        // 连接活跃度看门狗：记录最后一次收到服务端数据的时间、本次连接起点。
+        // 注意不能在 select 循环里给 ws.next() 套 75s timeout——heartbeat（30s）、
+        // flush、stats（60s）每隔几十秒就触发一次，每次循环都会把 timeout future
+        // drop 重建，75s 永远无法到期。结果是连接假死（TCP 未断但服务端不再推
+        // 数据）时既不重连也无日志，表现为"连着但收不到弹幕"。改由 heartbeat
+        // 分支顺带检查空闲时长，超时主动断开让上层重连。
+        let mut last_data_at = std::time::Instant::now();
+        let connected_at = std::time::Instant::now();
 
         let flush_secs = queue.poll_secs.clamp(1, 60) as u64;
         let mut flush_tick = tokio::time::interval(Duration::from_secs(flush_secs));
@@ -459,10 +467,22 @@ mod imp {
             }
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    // 看门狗：连续 90 秒没收到任何服务端帧（含心跳响应）就判定假死，
+                    // 主动断开重连。B 站正常每 30 秒有心跳响应，90 秒是保守阈值。
+                    // 这里必须打印明确日志，否则假死表现为"静默收不到弹幕"。
+                    let idle = last_data_at.elapsed();
+                    if idle >= Duration::from_secs(90) {
+                        log::warn!(
+                            "[弹幕] queue_id={queue_id} room={real_room_id} 连接假死：已 {}s 未收到服务端数据（收包={received_frames}，弹幕={received_danmaku}，命中={matched}，待写入={}），主动断开重连",
+                            idle.as_secs(),
+                            pending.len()
+                        );
+                        return Err(format!("连接假死：{}s 未收到服务端数据", idle.as_secs()));
+                    }
                     ws.send(Message::Binary(make_packet(2, b"[object Object]").into()))
                         .await
                         .map_err(|e| format!("发送弹幕心跳失败：{e}"))?;
-                    log::debug!("队列 #{queue_id}：已发送心跳");
+                    log::debug!("[弹幕] queue_id={queue_id} room={real_room_id} 已发送心跳，距离上次收包 {}s", idle.as_secs());
                 }
                 _ = flush_tick.tick() => {
                     // 规则可能刚被修改：每个刷新周期读一次最新配置
@@ -510,24 +530,37 @@ mod imp {
                         pending.len()
                     );
                 }
-                msg = tokio::time::timeout(Duration::from_secs(75), ws.next()) => {
-                    let msg = msg.map_err(|_| "弹幕服务器长时间无响应".to_string())?;
+                msg = ws.next() => {
                     match msg {
                         Some(Ok(Message::Binary(data))) => {
                             received_frames += 1;
+                            // 任意服务端帧都算连接活跃，重置假死看门狗。
+                            last_data_at = std::time::Instant::now();
                             log::trace!(
                                 "[弹幕] queue_id={queue_id} room={real_room_id} 收到二进制帧，字节数={}",
                                 data.len()
                             );
                             let mut decoded = Vec::new();
                             if let Err(e) = decode_frame(&data, &mut decoded) {
+                                log::warn!(
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 解析弹幕包失败：{e}（字节数={}），断开重连",
+                                    data.len()
+                                );
                                 return Err(format!("解析弹幕包失败：{e}"));
                             }
                             for (op, value) in decoded {
                                 if op == 8 {
+                                    last_data_at = std::time::Instant::now();
                                     let code = value.get("code").and_then(as_i64).unwrap_or(-1);
                                     if code != 0 {
-                                        return Err(format!("弹幕鉴权失败（code {code}）"));
+                                        let detail = value
+                                            .get("msg")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        log::warn!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 服务端拒绝鉴权：code={code} msg={detail:?}；6 秒后重连"
+                                        );
+                                        return Err(format!("弹幕鉴权失败（code {code} {detail}）"));
                                     }
                                     connected = true;
                                     patch_status(app, queue_id, |s| {
@@ -581,23 +614,40 @@ mod imp {
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
+                            last_data_at = std::time::Instant::now();
                             ws.send(Message::Pong(payload))
                                 .await
                                 .map_err(|e| format!("回复 WebSocket Ping 失败：{e}"))?;
                             log::trace!("[弹幕] queue_id={queue_id} 已回复 WebSocket Pong");
                         }
                         Some(Ok(Message::Close(frame))) => {
-                            log::warn!("[弹幕] queue_id={queue_id} room={real_room_id} 服务端关闭连接：{frame:?}");
+                            log::warn!(
+                                "[弹幕] queue_id={queue_id} room={real_room_id} 服务端主动关闭连接：{frame:?}（本次连接 {}s，收包={received_frames}，弹幕={received_danmaku}，命中={matched}），6 秒后重连",
+                                connected_at.elapsed().as_secs()
+                            );
                             return Err("弹幕服务器关闭了连接".into());
                         }
                         Some(Ok(other)) => {
+                            last_data_at = std::time::Instant::now();
                             log::debug!("[弹幕] queue_id={queue_id} 忽略非二进制 WebSocket 消息：{other:?}");
                         }
                         Some(Err(e)) => {
-                            log::warn!("[弹幕] queue_id={queue_id} room={real_room_id} WebSocket 接收错误：{e}");
+                            log::warn!(
+                                "[弹幕] queue_id={queue_id} room={real_room_id} WebSocket 接收错误：{e}（本次连接 {}s，收包={received_frames}，弹幕={received_danmaku}，命中={matched}），6 秒后重连",
+                                connected_at.elapsed().as_secs()
+                            );
                             return Err(format!("弹幕连接中断：{e}"));
                         }
-                        None => return Err("弹幕连接已断开".into()),
+                        // 对端直接断开 TCP 且没有 Close 帧：以前这里静默返回，
+                        // 是"连接莫名没了但日志什么都没有"的主要来源。
+                        None => {
+                            log::warn!(
+                                "[弹幕] queue_id={queue_id} room={real_room_id} 连接已断开（对端关闭，无 Close 帧）：本次连接 {}s，收包={received_frames}，弹幕={received_danmaku}，命中={matched}，待写入={}，6 秒后重连",
+                                connected_at.elapsed().as_secs(),
+                                pending.len()
+                            );
+                            return Err("弹幕连接已断开（对端关闭）".into());
+                        }
                     }
                 }
             }

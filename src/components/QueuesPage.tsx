@@ -301,6 +301,31 @@ function QueueEditor({
   const patternErrs = useMemo(() => patternErrors(patternList), [patternList]);
   const patternsValid = patternErrs.length === 0 && patternList.some((p) => p.trim() !== "");
 
+  // 正则测试框：输入弹幕文本后延迟 0.5 秒验证是否命中当前正则（防止逐字输入时频繁校验）。
+  // null 表示尚未验证（输入为空 / 正则有语法错误 / 没有规则）。
+  const [testText, setTestText] = useState("");
+  const [testMatched, setTestMatched] = useState<boolean | null>(null);
+  useEffect(() => {
+    const value = testText.trim();
+    if (!value || patternErrs.length > 0 || !patternList.some((p) => p.trim())) {
+      setTestMatched(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const regs = patternList
+        .filter((p) => p.trim())
+        .flatMap((p) => {
+          try {
+            return [new RegExp(p.trim())];
+          } catch {
+            return [];
+          }
+        });
+      setTestMatched(regs.some((re) => re.test(value)));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [testText, patternList, patternErrs]);
+
   const sorted = useMemo(() => sortedQueueEntries(queue), [queue]);
   const live = useMemo(() => ({ ...queue, ...draft, entries: queue.entries }), [queue, draft]);
   const badge = connectionBadge(queue, status);
@@ -539,6 +564,32 @@ function QueueEditor({
                 : "border-slate-300 focus:border-indigo-500 dark:border-slate-700"
             }`}
           />
+          {/* 正则测试：输入一条弹幕文本，0.5 秒后显示是否命中（✓ 命中 / ✗ 未命中） */}
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              value={testText}
+              onChange={(e) => setTestText(e.target.value)}
+              spellCheck={false}
+              placeholder="粘贴一条弹幕文本，验证是否命中上面的正则"
+              className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200 dark:placeholder:text-slate-600"
+            />
+            <span
+              aria-live="polite"
+              title={testMatched === null ? "输入文本后验证" : testMatched ? "命中正则" : "未命中正则"}
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-lg font-semibold ${
+                testMatched === true
+                  ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400"
+                  : testMatched === false
+                    ? "bg-rose-100 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400"
+                    : "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600"
+              }`}
+            >
+              {testMatched === true ? "✓" : testMatched === false ? "✗" : "·"}
+            </span>
+          </div>
+          {testText.trim() && patternErrs.length > 0 && (
+            <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">正则有语法错误，无法验证</p>
+          )}
           {patternErrs.length > 0 ? (
             <p className="mt-1 break-all text-[11px] text-rose-600 dark:text-rose-400">
               第 {patternErrs[0].line} 条正则不合法，暂未保存：{patternErrs[0].message}
