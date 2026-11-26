@@ -22,6 +22,7 @@ mod tray;
 mod updater;
 mod webdav;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -77,6 +78,9 @@ pub fn run() {
     // 日志插件：dev 终端 + WebView 控制台 + exe 同目录 logs/ 三路输出。
     // 插件内部先按 Trace 接收全部记录，真正的过滤等级由 `log::set_max_level`
     // 在 setup 里按 conf.toml 设置；这样设置页改日志等级可以立即生效，无需重启。
+    // 文件输出不使用插件默认的 KeepOne（超过 40KB 会删旧文件），改用每日文件：
+    // 同一天重复启动始终追加，跨天后第一条日志自动切换到新文件，历史文件全保留。
+    let daily_log = DailyLogFile::new(exe_dir.join(app_config::LOGS_DIR));
     builder = builder.plugin(
         tauri_plugin_log::Builder::new()
             .level(log::LevelFilter::Trace)
@@ -85,10 +89,11 @@ pub fn run() {
             .targets([
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
-                    path: exe_dir.join(app_config::LOGS_DIR),
-                    file_name: None,
-                }),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Dispatch(
+                    tauri_plugin_log::fern::Dispatch::new().chain(
+                        tauri_plugin_log::fern::Output::writer(Box::new(daily_log), "\n"),
+                    ),
+                )),
             ])
             .build(),
     );
@@ -117,7 +122,18 @@ pub fn run() {
 
             log::info!("配置文件：{}", loaded.path.display());
             log::info!("数据库目录：{}", data_dir.display());
-            log::info!("日志目录：{}", exe_dir.join(app_config::LOGS_DIR).display());
+            log::info!(
+                "日志目录：{}（按本地日期分文件，重启追加，历史文件不自动删除）",
+                exe_dir.join(app_config::LOGS_DIR).display()
+            );
+            match &loaded.bili_auth {
+                Some(auth) => log::info!(
+                    "[B站登录] 启动时已恢复 Cookie：uid={}，SESSDATA长度={}；等待弹幕任务联网校验",
+                    auth.uid,
+                    auth.sessdata.len()
+                ),
+                None => log::info!("[B站登录] 启动时未恢复到有效 Cookie，将使用游客连接"),
+            }
 
             let store = Arc::new(Store::new(data_dir.join("izuna-toolbox.db"))?);
 
@@ -285,6 +301,69 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");
+}
+
+/// 按本地日期切换的追加日志文件。
+///
+/// 文件名固定为 `izuna-toolbox-YYYY-MM-DD.log`。每次写入前检查日期，因此即使
+/// 应用连续运行跨过午夜也会切换；同一天再次启动则以追加方式打开，不截断、
+/// 不删除旧文件，也不按大小做会丢历史的轮转。
+struct DailyLogFile {
+    dir: PathBuf,
+    date: Option<(i32, u8, u8)>,
+    file: Option<std::fs::File>,
+}
+
+impl DailyLogFile {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            date: None,
+            file: None,
+        }
+    }
+
+    fn local_date() -> (i32, u8, u8) {
+        let now = tauri_plugin_log::TimezoneStrategy::UseLocal.get_now();
+        (now.year(), now.month() as u8, now.day())
+    }
+
+    fn ensure_current_file(&mut self) -> std::io::Result<()> {
+        let date = Self::local_date();
+        if self.date == Some(date) && self.file.is_some() {
+            return Ok(());
+        }
+        if let Some(mut old) = self.file.take() {
+            old.flush()?;
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        let (year, month, day) = date;
+        let path = self
+            .dir
+            .join(format!("izuna-toolbox-{year:04}-{month:02}-{day:02}.log"));
+        self.file = Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?,
+        );
+        self.date = Some(date);
+        Ok(())
+    }
+}
+
+impl std::io::Write for DailyLogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.ensure_current_file()?;
+        self.file.as_mut().expect("日志文件刚刚打开").write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+        }
+        Ok(())
+    }
 }
 
 /// 关闭浮窗 / 排队弹窗的默认行为：仍存在于数据库时改为「隐藏」，

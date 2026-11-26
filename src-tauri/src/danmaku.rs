@@ -65,6 +65,7 @@ mod imp {
     const DANMU_CONF_URL: &str =
         "https://api.live.bilibili.com/room/v1/Danmu/getConf?platform=pc&player=web&room_id=";
     const BUVID_URL: &str = "https://api.bilibili.com/x/frontend/finger/spi";
+    const NAV_URL: &str = "https://api.bilibili.com/x/web-interface/nav";
 
     struct WorkerHandle {
         signature: String,
@@ -333,7 +334,12 @@ mod imp {
             "队列 #{queue_id} 房间 {}：开始连接 B 站弹幕，解析真实房间号",
             queue.room_id
         );
-        let info = get_json(client, &format!("{ROOM_INFO_URL}{}", queue.room_id)).await?;
+        let info = get_json(
+            client,
+            &format!("{ROOM_INFO_URL}{}", queue.room_id),
+            "真实房间号",
+        )
+        .await?;
         let code = info.get("code").and_then(as_i64).unwrap_or(-1);
         if code != 0 {
             let msg = info
@@ -359,7 +365,12 @@ mod imp {
         );
 
         // 2. 弹幕服务器与 token
-        let conf = get_json(client, &format!("{DANMU_CONF_URL}{real_room_id}")).await?;
+        let conf = get_json(
+            client,
+            &format!("{DANMU_CONF_URL}{real_room_id}"),
+            "弹幕服务器配置",
+        )
+        .await?;
         let conf_code = conf.get("code").and_then(as_i64).unwrap_or(-1);
         if conf_code != 0 {
             return Err(format!("获取弹幕服务器失败（{conf_code}）"));
@@ -408,9 +419,18 @@ mod imp {
             .state::<crate::app_config::SettingsState>()
             .bili_auth();
         let sessdata = bili_auth.as_ref().map(|a| a.sessdata.clone());
-        if sessdata.is_some() {
+        let using_login = sessdata.is_some();
+        // 房间鉴权 code=0 只代表可以进入弹幕通道，并不能证明 Cookie 有效。
+        // 单独请求账号接口，明确记录 B 站是否认可这份 Cookie，避免把“连接成功”
+        // 错当成“登录成功”。校验失败不阻断连接，仍保留游客弹幕和后续诊断日志。
+        let login_check = if let Some(auth) = bili_auth.as_ref() {
+            verify_bili_login(client, auth, queue_id, real_room_id).await
+        } else {
+            None
+        };
+        if using_login {
             log::info!(
-                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录态连接（仅发送 SESSDATA，鉴权 uid=0），服务端将下发真实 uid/昵称"
+                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录 Cookie 连接（WebSocket 仅发送 SESSDATA，鉴权 uid=0）"
             );
         } else {
             log::info!(
@@ -419,7 +439,7 @@ mod imp {
         }
         // 仅游客连接需要 buvid 降低风控概率；登录连接只发 SESSDATA，避免设备指纹冲突。
         let buvid = if sessdata.is_none() {
-            fetch_buvid(client).await
+            fetch_buvid(client, queue_id).await
         } else {
             None
         };
@@ -444,14 +464,30 @@ mod imp {
                 .map(|s| format!("SESSDATA={s}"))
                 .or_else(|| buvid.as_deref().map(|b| format!("buvid3={b}")));
             if let Some(cookie) = cookie_value {
-                if let Ok(value) = HeaderValue::from_str(&cookie) {
-                    headers.insert("Cookie", value);
-                } else {
-                    log::warn!("[弹幕] queue_id={queue_id} Cookie 含非法字符，未能加入请求头");
+                match HeaderValue::from_str(&cookie) {
+                    Ok(value) => {
+                        headers.insert("Cookie", value);
+                        if let Some(sessdata) = sessdata.as_deref() {
+                            log::info!(
+                                "[弹幕] queue_id={queue_id} WebSocket Cookie 请求头已设置：字段=[SESSDATA]，值长度={}，指纹={}（不记录明文）",
+                                sessdata.len(),
+                                short_hash(sessdata)
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // 以前只警告后继续，实际会静默降级成游客连接。现在直接报出
+                        // 本阶段错误，避免“显示已登录却收到匿名信息”却找不到原因。
+                        log::error!(
+                            "[弹幕] queue_id={queue_id} Cookie 请求头构造失败：{e}；本次不会降级为游客连接"
+                        );
+                        let field = if using_login { "SESSDATA" } else { "buvid3" };
+                        return Err(format!("{field} 含非法字符，无法构造 Cookie 请求头：{e}"));
+                    }
                 }
             }
         }
-        let (mut ws, _) = tokio::time::timeout(
+        let (mut ws, ws_response) = tokio::time::timeout(
             Duration::from_secs(12),
             tokio_tungstenite::connect_async(request),
         )
@@ -472,11 +508,17 @@ mod imp {
             "key": token,
             "buvid": buvid.unwrap_or_default(),
         });
+        log::info!(
+            "[弹幕] queue_id={queue_id} WebSocket 握手成功：{host}:{port}，HTTP={}，房间={real_room_id}，protover=2，鉴权uid=0，token长度={}，buvid={}（token 不记录明文）",
+            ws_response.status(),
+            token.len(),
+            if auth.get("buvid").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()) { "已携带" } else { "未携带" }
+        );
         ws.send(Message::Binary(make_packet(7, auth.to_string().as_bytes()).into()))
             .await
             .map_err(|e| format!("发送弹幕鉴权失败：{e}"))?;
         log::info!(
-            "队列 #{queue_id}：连接 {host}:{port} 成功，已发送鉴权包，耗时 {}ms",
+            "队列 #{queue_id}：已向 {host}:{port} 发送房间鉴权包，耗时 {}ms，等待 op=8 鉴权回复",
             t0.elapsed().as_millis()
         );
 
@@ -489,6 +531,14 @@ mod imp {
         let mut matched = 0u64;
         let mut duplicates = 0u64;
         let mut written = 0u64;
+        let mut identified_danmaku = 0u64;
+        let mut anonymous_danmaku = 0u64;
+        let login_check_text = match (using_login, login_check) {
+            (false, _) => "未使用Cookie",
+            (true, Some(true)) => "账号接口已确认",
+            (true, Some(false)) => "账号接口判定未登录",
+            (true, None) => "账号接口校验失败",
+        };
         // 连接活跃度看门狗：记录最后一次收到服务端数据的时间、本次连接起点。
         // 注意不能在 select 循环里给 ws.next() 套 75s timeout——heartbeat（30s）、
         // flush、stats（60s）每隔几十秒就触发一次，每次循环都会把 timeout future
@@ -585,7 +635,7 @@ mod imp {
                 }
                 _ = stats_tick.tick() => {
                     log::info!(
-                        "[弹幕] queue_id={queue_id} room={real_room_id} 活跃统计：收包={received_frames}，弹幕={received_danmaku}，命中={matched}，重复={duplicates}，已写入={written}，待写入={}",
+                        "[弹幕] queue_id={queue_id} room={real_room_id} 活跃统计：收包={received_frames}，弹幕={received_danmaku}（真实uid={identified_danmaku}，匿名uid0={anonymous_danmaku}），命中={matched}，重复={duplicates}，已写入={written}，待写入={}，Cookie校验={login_check_text}",
                         pending.len()
                     );
                 }
@@ -632,7 +682,9 @@ mod imp {
                                         s.connected = true;
                                         s.last_error.clear();
                                     });
-                                    log::info!("[弹幕] queue_id={queue_id} room={real_room_id} 鉴权成功，开始接收消息");
+                                    log::info!(
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 房间鉴权通过（op=8 code=0），开始接收消息；注意：这不代表账号 Cookie 有效，Cookie校验={login_check_text}"
+                                    );
                                     continue;
                                 }
                                 if op == 3 {
@@ -666,15 +718,26 @@ mod imp {
                                             "[弹幕] queue_id={queue_id} room={real_room_id} 收到 DANMU_MSG 但解析字段失败（info 结构变化？）：{preview}"
                                         );
                                     } else {
-                                        log::info!(
+                                        log::debug!(
                                             "[弹幕] queue_id={queue_id} room={real_room_id} 收到非弹幕通知：cmd={cmd:?}，跳过"
                                         );
                                     }
                                     continue;
                                 };
                                 received_danmaku += 1;
+                                if uid > 0 {
+                                    identified_danmaku += 1;
+                                } else {
+                                    anonymous_danmaku += 1;
+                                    if using_login && anonymous_danmaku == 1 {
+                                        log::warn!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 登录连接首次收到匿名身份：uid=0、昵称={nickname:?}，Cookie校验={login_check_text}。若校验已通过，说明问题发生在弹幕通道身份下发阶段，而不是 Cookie 保存阶段"
+                                        );
+                                    }
+                                }
                                 log::info!(
-                                    "[弹幕] queue_id={queue_id} room={real_room_id} 收到弹幕：uid={uid} 昵称={nickname:?} 内容={text:?} 弹幕时间={at}"
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 收到弹幕：身份={}，uid={uid}，昵称={nickname:?}，内容={text:?}，弹幕时间={at}",
+                                    if uid > 0 { "真实uid" } else { "匿名uid0" }
                                 );
                                 let now = now_ms();
                                 if now - last_message_written >= 1000 {
@@ -825,32 +888,127 @@ mod imp {
         });
     }
 
-    async fn get_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
+    /// 用完整 Cookie 请求账号接口，返回 Some(true/false) 表示接口明确给出的
+    /// 登录状态；网络或响应异常返回 None。只记录状态码、code、mid 等诊断字段，
+    /// 不记录 Cookie、SESSDATA、用户昵称或响应全文。
+    async fn verify_bili_login(
+        client: &reqwest::Client,
+        auth: &crate::app_config::BiliAuth,
+        queue_id: i64,
+        room_id: i64,
+    ) -> Option<bool> {
+        let resp = match client
+            .get(NAV_URL)
+            .header("Referer", REFERER)
+            .header("Cookie", &auth.cookie)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} 账号接口请求失败：{e}；本次无法确认 Cookie 是否有效");
+                return None;
+            }
+        };
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} 读取账号接口响应失败：{e}");
+                return None;
+            }
+        };
+        if !status.is_success() {
+            log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} 账号接口 HTTP={status}，响应字节数={}，本次无法确认 Cookie 是否有效", text.len());
+            return None;
+        }
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} 账号接口不是有效 JSON：{e}，响应字节数={}", text.len());
+                return None;
+            }
+        };
+        let code = value.get("code").and_then(as_i64).unwrap_or(-1);
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("msg").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let data = value.get("data");
+        let is_login = data
+            .and_then(|d| d.get("isLogin"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mid = data
+            .and_then(|d| d.get("mid"))
+            .and_then(as_i64)
+            .unwrap_or(0);
+        if is_login && mid > 0 {
+            log::info!("[B站登录校验] queue_id={queue_id} room={room_id} Cookie 有效：HTTP={status}，code={code}，isLogin=true，mid={mid}；本地DedeUserID={}", auth.uid);
+            Some(true)
+        } else {
+            log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} B 站未认可登录 Cookie：HTTP={status}，code={code}，message={message:?}，isLogin={is_login}，mid={mid}。请重新从已登录的 www.bilibili.com 请求中复制完整 Cookie；本次弹幕仍可能显示 uid=0/打码昵称");
+            Some(false)
+        }
+    }
+
+    async fn get_json(
+        client: &reqwest::Client,
+        url: &str,
+        stage: &str,
+    ) -> Result<Value, String> {
         let resp = client
             .get(url)
             .header("Referer", REFERER)
             .send()
             .await
-            .map_err(|e| format!("请求 B 站失败：{e}"))?;
+            .map_err(|e| format!("请求 B 站{stage}失败：{e}"))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| format!("读取 B 站响应失败：{e}"))?;
+            .map_err(|e| format!("读取 B 站{stage}响应失败：{e}"))?;
         if !status.is_success() {
-            return Err(format!("B 站接口返回 HTTP {status}"));
+            return Err(format!(
+                "B 站{stage}接口返回 HTTP {status}，响应字节数={}",
+                text.len()
+            ));
         }
-        serde_json::from_str(&text).map_err(|e| format!("B 站接口返回异常：{e}"))
+        let value: Value = serde_json::from_str(&text).map_err(|e| {
+            format!("B 站{stage}接口返回非 JSON：{e}，响应字节数={}", text.len())
+        })?;
+        let code = value.get("code").and_then(as_i64).unwrap_or(-1);
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("msg").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        log::debug!("[弹幕] B 站{stage}响应：HTTP={status}，code={code}，message={message:?}，响应字节数={}", text.len());
+        Ok(value)
     }
 
-    async fn fetch_buvid(client: &reqwest::Client) -> Option<String> {
-        let value = get_json(client, BUVID_URL).await.ok()?;
-        value
-            .get("data")
-            .and_then(|d| d.get("b_3"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+    async fn fetch_buvid(client: &reqwest::Client, queue_id: i64) -> Option<String> {
+        match get_json(client, BUVID_URL, "游客设备标识").await {
+            Ok(value) => {
+                let buvid = value
+                    .get("data")
+                    .and_then(|d| d.get("b_3"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                if buvid.is_some() {
+                    log::debug!("[弹幕] queue_id={queue_id} 已获取游客 buvid（不记录明文）");
+                } else {
+                    log::warn!("[弹幕] queue_id={queue_id} 游客设备标识响应缺少 data.b_3，将不携带 buvid");
+                }
+                buvid
+            }
+            Err(e) => {
+                log::warn!("[弹幕] queue_id={queue_id} 获取游客 buvid 失败：{e}；将不携带 buvid 继续连接");
+                None
+            }
+        }
     }
 
     /// 敏感字符串的短哈希，仅用于连接签名对比，绝不打印原文。
@@ -932,19 +1090,24 @@ mod imp {
                     }
                     3 => return Err("弹幕服务器使用了不支持的 brotli 压缩".into()),
                     _ => {
-                        if let Ok(value) = serde_json::from_slice::<Value>(body) {
-                            out.push((op, value));
-                        }
+                        let value = serde_json::from_slice::<Value>(body)
+                            .map_err(|e| format!("op=5 通知正文不是有效 JSON：{e}"))?;
+                        out.push((op, value));
                     }
                 },
                 8 => {
-                    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-                        out.push((op, value));
-                    }
+                    // 鉴权回复解析失败以前会被静默忽略，随后 op=5 又可能把状态
+                    // 标成已连接，排错时完全看不到真正的协议异常。
+                    let value = serde_json::from_slice::<Value>(body)
+                        .map_err(|e| format!("op=8 鉴权回复不是有效 JSON：{e}"))?;
+                    out.push((op, value));
                 }
                 _ => {}
             }
             pos += total;
+        }
+        if pos != data.len() {
+            return Err(format!("弹幕包末尾有 {} 个无法解析的字节", data.len() - pos));
         }
         Ok(())
     }

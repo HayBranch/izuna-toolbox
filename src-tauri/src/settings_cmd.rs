@@ -45,7 +45,7 @@ pub fn set_log_level(
 
 /// 排查弹幕连接时，用系统文件管理器打开 exe 同目录的 logs/，并把目录路径
 /// 回给前端展示。日志等级默认 error，连接过程日志基本不可见；设置页的
-/// 「弹幕连接排查」会先把等级调到 info 再调这个命令，让用户直接拿到日志文件。
+/// 「弹幕连接排查」会先把等级调到 debug 再调这个命令，让用户直接拿到当天日志。
 #[tauri::command]
 pub fn open_log_dir(settings: State<'_, SettingsState>) -> Result<String, String> {
     let dir = PathBuf::from(settings.get().log_dir);

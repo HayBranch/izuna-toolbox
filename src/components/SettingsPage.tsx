@@ -273,8 +273,8 @@ function DeveloperTab({
       setCookieInput("");
       setLoginNote(
         next.biliUid > 0
-          ? `已登录（uid ${next.biliUid}），弹幕连接已用登录态重连，可获取真实 uid/昵称。`
-          : "已登录，弹幕连接已用登录态重连，可获取真实 uid/昵称（真实 uid 由服务端随弹幕下发）。",
+          ? `Cookie 已保存（uid ${next.biliUid}），弹幕连接已重连。B 站是否认可登录态，请查看日志中的「B站登录校验」。`
+          : "Cookie 已保存，弹幕连接已重连。B 站是否认可登录态，请查看日志中的「B站登录校验」。",
       );
     } catch (e) {
       setLoginError(errorText(e));
@@ -341,7 +341,7 @@ function DeveloperTab({
         setProbe({
           ok: false,
           text:
-            "✗ 自检失败：30 秒内没有等到新进程。可把日志等级调到 info，查看 logs/ 里的记录。",
+            "✗ 自检失败：30 秒内没有等到新进程。可把日志等级调到 info，查看 logs/ 里当天的日志。",
         });
       }, 30000);
     } catch (e) {
@@ -365,20 +365,20 @@ function DeveloperTab({
     }
   };
 
-  // 一键排查：把日志等级提到 info（连接过程/写入/重连都会落盘），
-  // 再打开 logs/ 目录让用户直接拿文件。error 是默认值，看不到这些记录。
+  // 一键排查：把日志等级提到 debug（账号校验、鉴权、消息类型、写入/重连都会落盘），
+  // 再打开 logs/ 目录让用户直接拿当天文件。error 是默认值，看不到这些记录。
   const startDanmakuDiag = async () => {
     setDiagBusy(true);
     setError("");
     setDiagNote("");
     try {
-      if (!["info", "debug", "trace"].includes(current)) {
-        const next = await saveLogLevel("info");
+      if (!["debug", "trace"].includes(current)) {
+        const next = await saveLogLevel("debug");
         onSettings(next);
       }
       const dir = await openLogDir();
       setDiagNote(
-        `已开启 info 日志并打开日志目录：${dir}。复现问题后把当天日志发来即可；排完记得把等级调回 error。`,
+        `已开启 debug 日志并打开日志目录：${dir}。请重新保存一次 Cookie 并复现匿名弹幕，再把当天的 izuna-toolbox-YYYY-MM-DD.log 发来；排完记得调回 error。`,
       );
     } catch (e) {
       setError(errorText(e));
@@ -524,11 +524,11 @@ function DeveloperTab({
           弹幕连接排查
         </h3>
         <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-          队列计数卡住、弹幕连不上时，点下面按钮把日志等级临时调到
-          <code className="font-mono"> info </code>并打开 logs/ 目录。日志按天分文件，
-          每条弹幕记录都带 <code className="font-mono">queue_id</code>、
-          <code className="font-mono">room</code>（直播间号）与真实房间号，可按队列分别排查：
-          连接各阶段、鉴权结果、每分钟活跃统计（收包/弹幕/命中/重复/写入）、断线重连与错误原因都会落盘。
+          登录后仍是匿名信息、队列计数卡住或弹幕连不上时，点下面按钮把日志等级临时调到
+          <code className="font-mono"> debug </code>并打开 logs/ 目录。日志按本地日期分文件，
+          重启追加且不会自动删除旧文件。记录包含 Cookie 脱敏字段、B 站账号接口校验、
+          WebSocket 握手与房间鉴权、真实/匿名 uid 统计、每分钟活跃统计和断线原因；
+          不会记录 Cookie、SESSDATA 或弹幕 token 明文。
         </p>
         <button
           type="button"

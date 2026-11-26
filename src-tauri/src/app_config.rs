@@ -150,10 +150,13 @@ impl SettingsState {
             guard.bili_logged_in = true;
         }
         log::info!(
-            "[B站登录] 已保存登录态 uid={}（仅 SESSDATA 会发给弹幕服务器），凭据文件 {}",
+            "[B站登录] 已保存 Cookie：uid={}，字段={:?}，SESSDATA长度={}（不会记录 Cookie 明文），凭据文件={}",
             auth.uid,
+            cookie_field_names(&auth.cookie),
+            auth.sessdata.len(),
             path.display()
         );
+        log::info!("[B站登录] 保存成功仅代表字段解析成功；弹幕重连后会请求账号接口核对 Cookie 是否仍有效");
         Ok(self.get())
     }
 
@@ -447,6 +450,18 @@ fn load_bili_auth(conf_path: &Path, warnings: &mut Vec<String>) -> Option<BiliAu
             None
         }
     }
+}
+
+/// 只提取 Cookie 字段名用于诊断；字段值（尤其 SESSDATA）绝不进入日志。
+fn cookie_field_names(cookie: &str) -> Vec<&str> {
+    let mut names: Vec<&str> = cookie
+        .split(';')
+        .filter_map(|pair| pair.split_once('=').map(|(key, _)| key.trim()))
+        .filter(|key| !key.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// 从浏览器复制的 Cookie 字符串里解析出 uid 与弹幕连接可用的 Cookie 头。
