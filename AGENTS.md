@@ -31,6 +31,30 @@ npm run bump -- 0.0.5   # 更新根 package.json 版本并同步 package-lock；
 
 发布流程：`npm run bump -- X.Y.Z` → 提交 → `git tag -a vX.Y.Z` → 推送标签。`v*` 标签会触发发布工作流。
 
+## 前置提醒：改代码前先核对版本（agent 每次开工必读）
+
+动手改代码**之前**，先确认「当前 `package.json` 的版本」和「仓库里最新的 `v*` 标签」是否一致：
+
+```bash
+git describe --tags --abbrev=0   # 仓库里最新的 v* 标签
+git tag -l "v$(node -p "require('./package.json').version")"  # 当前版本号是否已经打过标签
+```
+
+**若当前版本号已经存在对应的 `v*` 标签**（说明上一个版本已发版），必须按顺序完成这四步，
+**再做具体的功能/修复改动**：
+
+1. **版本号 +1**：`npm run bump -- X.Y.(Z+1)`（`package.json` / `package-lock.json` 是版本唯一来源，
+   `tauri.conf.json` 跟着走，`Cargo.toml` 版本占位 `0.0.0` 不要动）；
+2. **写 README 升级日志**：在 `README.md` 的「更新日志」小节最上方新增 `### vX.Y.Z`，
+   把本版本将要发布的内容按 `feat` / `fix` 用中文列清楚（可先写占位，收尾再补全）；
+3. **配置（pack）就绪**：确认 `package.json` 的 `name` / `version` 正确、新增依赖已同步
+   `package-lock.json`，需要随包分发的资源已在打包配置里（见「发布流水线」）；
+4. **再开始写代码**：功能实现、提交信息（`vX.Y.Z <类型>: <中文描述>`）、以及未完成事项的 README 补全，
+   都挂在新版本号下。
+
+**若当前版本号尚未打过标签**（上一个版本还停在「已提交、待打标签」），直接沿用当前版本号写代码即可，
+不要重复 +1。判断口径：`git tag -l "v<当前版本>"` 有输出 = 已发版需 +1；无输出 = 直接用。
+
 ## 提交信息
 
 - 格式：`vX.Y.Z <类型>: <中文描述>`，例如 `v0.1.1 docs: 将 AGENTS.md 中文化并补充提交信息规范`。
