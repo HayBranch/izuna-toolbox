@@ -445,9 +445,9 @@ function DeveloperTab({
           游客连接时，B 站会把弹幕的 uid 全部改成 0、昵称打码（如 <code>泉***</code>
           ），工具无法反查真实身份。登录后服务端会下发真实 uid 与完整昵称，多个游客
           弹幕也不再被误当成同一个人。Cookie 只存本机 <code>conf/auth.toml</code>
-          ，不进配置备份、不写日志。连接弹幕服务器时<strong>只发送 SESSDATA</strong>
-          （不会发送完整 Cookie），其余字段仅留作存档——带 buvid/sid 等字段会让服务端
-          判定设备指纹不一致，直接断开连接。
+          ，不进配置备份、不写日志。连接弹幕服务器时只发送 <code>SESSDATA</code> 与{" "}
+          <code>buvid3</code> 两个字段（不会发送完整 Cookie）。请确保粘贴的 Cookie 里带有{" "}
+          <code>buvid3</code>，并且是浏览器请求头里的原样文本（SESSDATA 保持 URL 编码，不要解码）。
         </p>
 
         <div className="mt-3 flex items-center gap-2 text-sm">

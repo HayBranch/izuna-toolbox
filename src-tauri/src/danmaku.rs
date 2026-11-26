@@ -284,7 +284,14 @@ mod imp {
             .await
             {
                 Ok(()) => {
-                    log::info!("[弹幕] queue_id={queue_id} room={} 本次连接结束", queue.room_id);
+                    if cancel.load(Ordering::Relaxed) {
+                        log::info!(
+                            "[弹幕] queue_id={queue_id} room={} 旧连接已按配置变化关闭（非断线）",
+                            queue.room_id
+                        );
+                    } else {
+                        log::info!("[弹幕] queue_id={queue_id} room={} 本次连接结束", queue.room_id);
+                    }
                     Duration::from_secs(3)
                 }
                 Err(e) => {
@@ -317,6 +324,13 @@ mod imp {
         cancel.load(Ordering::Relaxed)
     }
 
+    /// 在 select 里等待取消标志（AtomicBool 没有异步通知，只能短间隔轮询）。
+    async fn wait_cancelled(cancel: &Arc<AtomicBool>) {
+        while !cancel.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     /// 连接一次并持续接收；连接断开时返回错误，由 run_worker 决定重连。
     async fn stream_once(
         app: &AppHandle,
@@ -338,6 +352,7 @@ mod imp {
             client,
             &format!("{ROOM_INFO_URL}{}", queue.room_id),
             "真实房间号",
+            None,
         )
         .await?;
         let code = info.get("code").and_then(as_i64).unwrap_or(-1);
@@ -364,11 +379,63 @@ mod imp {
             t0.elapsed().as_millis()
         );
 
-        // 2. 弹幕服务器与 token
+        // 2. 登录态（对齐 blivedm 的 web 客户端）：
+        //    a. 用 Cookie 请求账号接口，拿到服务端认可的 mid；
+        //    b. WebSocket Cookie 头发 `SESSDATA` + 同一份 Cookie 里的 `buvid3`；
+        //    c. 鉴权包 `uid` = mid、`buvid` = 同一个 buvid3。
+        //    旧实现「只发 SESSDATA、uid=0、不带 buvid」会被服务端当成未登录：
+        //    日志表现为连接 30 秒后收到 LOG_IN_NOTICE（未登录提示），随后要么
+        //    弹幕变匿名，要么服务端不再推送任何通知但心跳仍正常。
+        //    账号接口判定未登录 / 校验失败时回退游客连接，不再建立“半登录”连接。
+        let bili_auth = app
+            .state::<crate::app_config::SettingsState>()
+            .bili_auth();
+        let cookie_configured = bili_auth.is_some();
+        let login_mid = match bili_auth.as_ref() {
+            Some(auth) => verify_bili_login(client, auth, queue_id, real_room_id).await,
+            None => None,
+        };
+        let login = match bili_auth.as_ref() {
+            Some(auth) => match login_mid {
+                Some(mid) if mid > 0 => {
+                    log::info!(
+                        "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录态连接：鉴权uid={mid}，Cookie字段=[SESSDATA{}]（不记录明文）",
+                        if auth.buvid3.is_some() { ", buvid3" } else { "" }
+                    );
+                    Some((auth.sessdata.as_str(), auth.buvid3.as_deref(), mid))
+                }
+                Some(_) => {
+                    log::warn!(
+                        "[弹幕] queue_id={queue_id} room={real_room_id} 账号接口判定 Cookie 未登录，本次回退为游客连接"
+                    );
+                    None
+                }
+                None => {
+                    log::warn!(
+                        "[弹幕] queue_id={queue_id} room={real_room_id} 账号接口校验未完成，本次回退为游客连接"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let using_login = login.is_some();
+        let login_cookie = login.map(|(sessdata, buvid3, _)| match buvid3 {
+            Some(b) => format!("SESSDATA={sessdata}; buvid3={b}"),
+            None => format!("SESSDATA={sessdata}"),
+        });
+        if !using_login {
+            log::info!(
+                "[弹幕] queue_id={queue_id} room={real_room_id} 使用游客连接（uid=0，昵称会被服务端打码；可在设置页粘贴 B 站 Cookie 登录）"
+            );
+        }
+
+        // 3. 弹幕服务器与 token（登录态下带上同样的 Cookie）
         let conf = get_json(
             client,
             &format!("{DANMU_CONF_URL}{real_room_id}"),
             "弹幕服务器配置",
+            login_cookie.as_deref(),
         )
         .await?;
         let conf_code = conf.get("code").and_then(as_i64).unwrap_or(-1);
@@ -405,43 +472,12 @@ mod imp {
             "队列 #{queue_id}：获取到 {} 个弹幕服务器",
             hosts.len()
         );
-        // 3. 登录态：服务端只对登录连接下发真实 uid 与未打码昵称；
-        //    游客连接一律 uid=0、昵称打码（如 `泉***`），无法反查真实身份。
-        //    Cookie 只放在内存/独立文件里，绝不打印内容。
-        //
-        //    关键：B 站弹幕 WebSocket 的登录态只靠 Cookie 里的 SESSDATA 传递，
-        //    鉴权包的 uid 必须保持 0（服务端依据 SESSDATA 识别账号并下发真实身份）。
-        //    曾经的实现把 uid 填成 DedeUserID、Cookie 又塞进 buvid3/buvid4/sid
-        //    等完整字段，与鉴权包里另取的 buvid 冲突，服务端在鉴权阶段直接 RST
-        //    （表现：连接成功→发鉴权包→0 秒断开、收包=0）。这里对齐主流库做法：
-        //    只发 SESSDATA、uid=0、不额外带 buvid。
-        let bili_auth = app
-            .state::<crate::app_config::SettingsState>()
-            .bili_auth();
-        let sessdata = bili_auth.as_ref().map(|a| a.sessdata.clone());
-        let using_login = sessdata.is_some();
-        // 房间鉴权 code=0 只代表可以进入弹幕通道，并不能证明 Cookie 有效。
-        // 单独请求账号接口，明确记录 B 站是否认可这份 Cookie，避免把“连接成功”
-        // 错当成“登录成功”。校验失败不阻断连接，仍保留游客弹幕和后续诊断日志。
-        let login_check = if let Some(auth) = bili_auth.as_ref() {
-            verify_bili_login(client, auth, queue_id, real_room_id).await
-        } else {
+        // 4. 设备标识：登录连接用 Cookie 自带的 buvid3（已在 login 里）；
+        //    游客连接另取一个 buvid 降低风控概率。
+        let guest_buvid = if using_login {
             None
-        };
-        if using_login {
-            log::info!(
-                "[弹幕] queue_id={queue_id} room={real_room_id} 使用登录 Cookie 连接（WebSocket 仅发送 SESSDATA，鉴权 uid=0）"
-            );
         } else {
-            log::info!(
-                "[弹幕] queue_id={queue_id} room={real_room_id} 使用游客连接（uid=0，昵称会被服务端打码；可在设置页粘贴 B 站 Cookie 登录）"
-            );
-        }
-        // 仅游客连接需要 buvid 降低风控概率；登录连接只发 SESSDATA，避免设备指纹冲突。
-        let buvid = if sessdata.is_none() {
             fetch_buvid(client, queue_id).await
-        } else {
-            None
         };
 
         let (host, port) = hosts[*host_turn % hosts.len()].clone();
@@ -456,24 +492,26 @@ mod imp {
             headers.insert("Origin", HeaderValue::from_static(REFERER.trim_end_matches('/')));
             headers.insert("Referer", HeaderValue::from_static(REFERER));
             headers.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-            // 登录连接只发 SESSDATA（删掉 buvid3/buvid4/sid/DedeUserID 等，
-            // 避免与鉴权包字段或服务端设备指纹校验冲突而被 RST）；
-            // 游客连接只带新取的 buvid 降低风控概率。
-            let cookie_value = sessdata
-                .as_deref()
-                .map(|s| format!("SESSDATA={s}"))
-                .or_else(|| buvid.as_deref().map(|b| format!("buvid3={b}")));
+            // 登录连接发 SESSDATA + 同一份 Cookie 的 buvid3（鉴权包的 buvid 也用它，
+            // 保证设备指纹一致）；游客连接只带新取的 buvid 降低风控概率。
+            let cookie_value = login_cookie.clone().or_else(|| {
+                guest_buvid
+                    .as_deref()
+                    .map(|b| format!("buvid3={b}"))
+            });
             if let Some(cookie) = cookie_value {
                 match HeaderValue::from_str(&cookie) {
                     Ok(value) => {
                         headers.insert("Cookie", value);
-                        if let Some(sessdata) = sessdata.as_deref() {
-                            log::info!(
-                                "[弹幕] queue_id={queue_id} WebSocket Cookie 请求头已设置：字段=[SESSDATA]，值长度={}，指纹={}（不记录明文）",
-                                sessdata.len(),
-                                short_hash(sessdata)
-                            );
-                        }
+                        log::info!(
+                            "[弹幕] queue_id={queue_id} WebSocket Cookie 请求头已设置：字段=[{}]，值长度={}（不记录明文）",
+                            if using_login {
+                                if login.is_some_and(|(_, b, _)| b.is_some()) { "SESSDATA, buvid3" } else { "SESSDATA" }
+                            } else {
+                                "buvid3"
+                            },
+                            cookie.len()
+                        );
                     }
                     Err(e) => {
                         // 以前只警告后继续，实际会静默降级成游客连接。现在直接报出
@@ -495,24 +533,30 @@ mod imp {
         .map_err(|_| "连接弹幕服务器超时".to_string())?
         .map_err(|e| format!("连接弹幕服务器失败：{e}"))?;
 
-        // 4. 鉴权：uid 固定 0。登录态完全由 Cookie 里的 SESSDATA 传递，
-        //    服务端鉴权通过后会在弹幕里下发真实 uid 与昵称；填 DedeUserID
-        //    反而会因身份/token 不匹配触发风控。
-        //    buvid 仅在游客连接时带（与上面的 Cookie 头一致）。
+        // 5. 鉴权包：登录连接 uid = 账号接口返回的 mid，buvid = Cookie 自带的 buvid3；
+        //    游客连接 uid = 0，buvid = 另取的游客标识。
+        let auth_uid = login.map_or(0, |(_, _, mid)| mid);
+        let auth_buvid = login
+            .and_then(|(_, buvid3, _)| buvid3.map(str::to_string))
+            .or(guest_buvid);
         let auth = serde_json::json!({
-            "uid": 0,
+            "uid": auth_uid,
             "roomid": real_room_id,
             "protover": 2,
             "platform": "web",
             "type": 2,
             "key": token,
-            "buvid": buvid.unwrap_or_default(),
+            "buvid": auth_buvid.clone().unwrap_or_default(),
         });
         log::info!(
-            "[弹幕] queue_id={queue_id} WebSocket 握手成功：{host}:{port}，HTTP={}，房间={real_room_id}，protover=2，鉴权uid=0，token长度={}，buvid={}（token 不记录明文）",
+            "[弹幕] queue_id={queue_id} WebSocket 握手成功：{host}:{port}，HTTP={}，房间={real_room_id}，protover=2，鉴权uid={auth_uid}，token长度={}，buvid来源={}（token/buvid 不记录明文）",
             ws_response.status(),
             token.len(),
-            if auth.get("buvid").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()) { "已携带" } else { "未携带" }
+            if auth_buvid.is_some() {
+                if using_login { "Cookie自带buvid3" } else { "游客buvid" }
+            } else {
+                "未携带"
+            }
         );
         ws.send(Message::Binary(make_packet(7, auth.to_string().as_bytes()).into()))
             .await
@@ -533,19 +577,21 @@ mod imp {
         let mut written = 0u64;
         let mut identified_danmaku = 0u64;
         let mut anonymous_danmaku = 0u64;
-        let login_check_text = match (using_login, login_check) {
-            (false, _) => "未使用Cookie",
-            (true, Some(true)) => "账号接口已确认",
-            (true, Some(false)) => "账号接口判定未登录",
-            (true, None) => "账号接口校验失败",
+        let login_check_text = if using_login {
+            "账号接口已确认"
+        } else if !cookie_configured {
+            "未使用Cookie"
+        } else if login_mid == Some(0) {
+            "账号接口判定未登录，已回退游客"
+        } else {
+            "账号接口校验失败，已回退游客"
         };
-        // 连接活跃度看门狗：记录最后一次收到服务端数据的时间、本次连接起点。
-        // 注意不能在 select 循环里给 ws.next() 套 75s timeout——heartbeat（30s）、
-        // flush、stats（60s）每隔几十秒就触发一次，每次循环都会把 timeout future
-        // drop 重建，75s 永远无法到期。结果是连接假死（TCP 未断但服务端不再推
-        // 数据）时既不重连也无日志，表现为"连着但收不到弹幕"。改由 heartbeat
-        // 分支顺带检查空闲时长，超时主动断开让上层重连。
+        // 两条看门狗：
+        // - last_data_at：任何服务端帧（含 op=3 心跳响应）都刷新，90s 无帧 = 传输层假死；
+        // - last_notify_at：只看 op=5 通知。登录连接出过“心跳一直正常、但服务端一条
+        //   通知都不再推”的静默停推，传输层看门狗发现不了，必须单独计时。
         let mut last_data_at = std::time::Instant::now();
+        let mut last_notify_at = std::time::Instant::now();
         let connected_at = std::time::Instant::now();
 
         let flush_secs = queue.poll_secs.clamp(1, 60) as u64;
@@ -568,6 +614,13 @@ mod imp {
                 return Ok(());
             }
             tokio::select! {
+                // 取消分支：reconcile 改 Cookie / 暂停队列时要立刻关掉旧连接。
+                // 以前只在循环顶部检查标志，旧连接会继续活到下一次事件（最长约 30s），
+                // 期间新旧两条连接同时收弹幕、同时写库，日志里还会冒出一条误导性的
+                // “本次连接结束”。
+                _ = wait_cancelled(cancel) => {
+                    return Ok(());
+                }
                 _ = heartbeat.tick() => {
                     // 看门狗：连续 90 秒没收到任何服务端帧（含心跳响应）就判定假死，
                     // 主动断开重连。B 站正常每 30 秒有心跳响应，90 秒是保守阈值。
@@ -585,6 +638,18 @@ mod imp {
                         .await
                         .map_err(|e| format!("发送弹幕心跳失败：{e}"))?;
                     log::debug!("[弹幕] queue_id={queue_id} room={real_room_id} 已发送心跳，距离上次收包 {}s", idle.as_secs());
+                    // 鉴权通过后长时间没有任何 op=5 通知：直播间正常每 30 秒左右
+                    // 就有 STOP_LIVE_ROOM_LIST / 人气值等通知。心跳响应照常、通知
+                    // 却全无，说明服务端已静默停推，重连而不是干等。
+                    let notify_idle = last_notify_at.elapsed();
+                    if connected && notify_idle >= Duration::from_secs(120) {
+                        log::warn!(
+                            "[弹幕] queue_id={queue_id} room={real_room_id} 服务端静默停推：已 {}s 没有任何通知（心跳正常，收包={received_frames}，弹幕={received_danmaku}，命中={matched}，待写入={}），主动断开重连",
+                            notify_idle.as_secs(),
+                            pending.len()
+                        );
+                        return Err(format!("服务端静默停推：{}s 未收到任何通知", notify_idle.as_secs()));
+                    }
                 }
                 _ = flush_tick.tick() => {
                     // 规则可能刚被修改：每个刷新周期读一次最新配置
@@ -694,12 +759,38 @@ mod imp {
                                 if op != 5 {
                                     continue;
                                 }
+                                last_notify_at = std::time::Instant::now();
                                 if !connected {
                                     connected = true;
                                     patch_status(app, queue_id, |s| {
                                         s.connected = true;
                                         s.last_error.clear();
                                     });
+                                }
+                                let cmd = value
+                                    .get("cmd")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("(无 cmd)");
+                                // LOG_IN_NOTICE 是服务端发给“未登录连接”的提示（连接约 30 秒后到）。
+                                // 登录连接收到它，说明 SESSDATA 没被弹幕服务器认可——这是判断
+                                // 登录态是否真正生效最直接的信号，必须显式写进日志。
+                                if cmd == "LOG_IN_NOTICE" {
+                                    let notice = value
+                                        .get("data")
+                                        .and_then(|d| {
+                                            d.get("message").or_else(|| d.get("key"))
+                                        })
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if using_login {
+                                        log::warn!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 登录连接收到 LOG_IN_NOTICE={notice:?}：服务端未认可登录态，后续弹幕可能变为匿名"
+                                        );
+                                    } else {
+                                        log::info!(
+                                            "[弹幕] queue_id={queue_id} room={real_room_id} 游客连接收到 LOG_IN_NOTICE={notice:?}：此后弹幕为匿名（uid=0、昵称打码）"
+                                        );
+                                    }
                                 }
                                 // 排查用：每条 op=5 通知都打印原始 cmd 与关键字段，
                                 // 让用户能直接看到"收到的到底是什么、为什么没 +1"。
@@ -888,15 +979,15 @@ mod imp {
         });
     }
 
-    /// 用完整 Cookie 请求账号接口，返回 Some(true/false) 表示接口明确给出的
-    /// 登录状态；网络或响应异常返回 None。只记录状态码、code、mid 等诊断字段，
-    /// 不记录 Cookie、SESSDATA、用户昵称或响应全文。
+    /// 用完整 Cookie 请求账号接口。返回 Some(mid)：mid > 0 表示已登录（鉴权包
+    /// 的 uid 就用它），mid = 0 表示接口明确判定未登录；网络或响应异常返回 None。
+    /// 只记录状态码、code、mid 等诊断字段，不记录 Cookie、SESSDATA、昵称或响应全文。
     async fn verify_bili_login(
         client: &reqwest::Client,
         auth: &crate::app_config::BiliAuth,
         queue_id: i64,
         room_id: i64,
-    ) -> Option<bool> {
+    ) -> Option<i64> {
         let resp = match client
             .get(NAV_URL)
             .header("Referer", REFERER)
@@ -946,10 +1037,10 @@ mod imp {
             .unwrap_or(0);
         if is_login && mid > 0 {
             log::info!("[B站登录校验] queue_id={queue_id} room={room_id} Cookie 有效：HTTP={status}，code={code}，isLogin=true，mid={mid}；本地DedeUserID={}", auth.uid);
-            Some(true)
+            Some(mid)
         } else {
             log::warn!("[B站登录校验] queue_id={queue_id} room={room_id} B 站未认可登录 Cookie：HTTP={status}，code={code}，message={message:?}，isLogin={is_login}，mid={mid}。请重新从已登录的 www.bilibili.com 请求中复制完整 Cookie；本次弹幕仍可能显示 uid=0/打码昵称");
-            Some(false)
+            Some(0)
         }
     }
 
@@ -957,10 +1048,13 @@ mod imp {
         client: &reqwest::Client,
         url: &str,
         stage: &str,
+        cookie: Option<&str>,
     ) -> Result<Value, String> {
-        let resp = client
-            .get(url)
-            .header("Referer", REFERER)
+        let mut request = client.get(url).header("Referer", REFERER);
+        if let Some(cookie) = cookie {
+            request = request.header("Cookie", cookie);
+        }
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("请求 B 站{stage}失败：{e}"))?;
@@ -989,7 +1083,7 @@ mod imp {
     }
 
     async fn fetch_buvid(client: &reqwest::Client, queue_id: i64) -> Option<String> {
-        match get_json(client, BUVID_URL, "游客设备标识").await {
+        match get_json(client, BUVID_URL, "游客设备标识", None).await {
             Ok(value) => {
                 let buvid = value
                     .get("data")

@@ -82,9 +82,12 @@ pub struct BiliAuth {
     /// 用户粘贴的完整 Cookie（原样存档，便于以后扩展）
     pub cookie: String,
     /// 从完整 Cookie 中提取的 SESSDATA 值。
-    /// 弹幕 WebSocket 只发这一个字段：带上 buvid3/buvid4/sid 等会让服务端
-    /// 拿 Cookie 里的设备指纹和鉴权包的 buvid 对比，不一致会被直接 RST。
+    /// 弹幕 WebSocket 的 Cookie 头只发 `SESSDATA` 与 `buvid3` 两个字段（对齐 blivedm），
+    /// 其余字段不发：sid / buvid4 等与鉴权包字段对不上时服务端会直接 RST。
     pub sessdata: String,
+    /// 同一份 Cookie 里的 `buvid3`：与 SESSDATA 配套的设备标识，鉴权包的 `buvid`
+    /// 必须用它（不能用另取的游客 buvid），缺失时鉴权包不带 buvid。
+    pub buvid3: Option<String>,
 }
 
 pub struct LoadedConfig {
@@ -483,6 +486,7 @@ fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
     }
     let mut uid: Option<i64> = None;
     let mut sessdata = String::new();
+    let mut buvid3: Option<String> = None;
     for pair in cookie.split(';') {
         let pair = pair.trim();
         let Some((key, value)) = pair.split_once('=') else {
@@ -499,6 +503,11 @@ fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
                     sessdata = value.to_string();
                 }
             }
+            "buvid3" => {
+                if !value.is_empty() {
+                    buvid3 = Some(value.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -512,6 +521,7 @@ fn parse_bili_cookie(raw: &str) -> Result<BiliAuth, String> {
         uid,
         cookie,
         sessdata,
+        buvid3,
     })
 }
 
@@ -584,6 +594,7 @@ mod tests {
         let auth = parse_bili_cookie(raw).unwrap();
         assert_eq!(auth.uid, 123456);
         assert_eq!(auth.sessdata, "abc%2Fdef");
+        assert_eq!(auth.buvid3.as_deref(), Some("ABC"));
         assert_eq!(auth.cookie, raw);
     }
 
