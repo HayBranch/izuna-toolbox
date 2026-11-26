@@ -4,18 +4,39 @@
 //! Linux 原生构建（CNB）不编译 reqwest，非 Windows 直接返回「不支持」。
 //! 只接受 http(s) 地址；用户名/密码由 reqwest 按 Basic Auth 发送，不写入日志。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-/// 前端设置页填写的 WebDAV 连接信息（保存在 WebView localStorage，不写 conf.toml）。
-#[derive(Debug, Clone, Deserialize)]
+/// 前端设置页填写的 WebDAV 连接信息。
+/// 保存在 exe 同目录 conf/auth.toml 的 [webdav] 段，不写 conf.toml、不进备份导出。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebdavConfig {
     /// 服务器根地址，如 https://dav.example.com/remote.php/dav/files/me
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
     pub password: String,
     /// 远程目录，如 izuna-toolbox（可多级，用 / 分隔）
+    #[serde(default)]
     pub remote_dir: String,
+    /// 导入时下载的远程文件名。
+    #[serde(default)]
+    pub remote_file: String,
+}
+
+impl WebdavConfig {
+    /// 未填写时的缺省值：目录与文件名沿用历史默认值，其余留空。
+    pub fn with_defaults(mut self) -> Self {
+        if self.remote_dir.trim().is_empty() {
+            self.remote_dir = "izuna-toolbox".to_string();
+        }
+        if self.remote_file.trim().is_empty() {
+            self.remote_file = "izuna-backup.json".to_string();
+        }
+        self
+    }
 }
 
 pub async fn put(cfg: &WebdavConfig, file_name: &str, body: Vec<u8>) -> Result<String, String> {

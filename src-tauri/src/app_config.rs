@@ -13,12 +13,14 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::webdav::WebdavConfig;
+
 pub const CONF_DIR: &str = "conf";
 pub const CONF_FILE: &str = "conf.toml";
 pub const DATA_DIR: &str = "data";
 pub const LOGS_DIR: &str = "logs";
-/// 本地私有凭据（B 站登录 Cookie 等）统一存这里，绝不写进 conf.toml：
-/// 备份导出/导入只处理 conf.toml，这样导出的配置不会把账号登录态带出去。
+/// 本地私有凭据（B 站登录 Cookie、WebDAV 账号密码）统一存这里，绝不写进 conf.toml：
+/// 备份导出/导入只处理 conf.toml，这样导出的配置不会把账号登录态与同步凭据带出去。
 pub const AUTH_FILE: &str = "auth.toml";
 /// 旧版单用途文件，仅用于启动时迁移到 auth.toml 后删除。
 const LEGACY_BILI_COOKIE_FILE: &str = "bili_cookie.txt";
@@ -64,6 +66,9 @@ pub struct SettingsInfo {
 struct AuthFile {
     #[serde(default)]
     bili: Option<AuthBili>,
+    /// WebDAV 连接信息（含账号密码），和 Cookie 一样不进 conf.toml / 备份。
+    #[serde(default)]
+    webdav: Option<WebdavConfig>,
 }
 
 /// B 站登录态在 auth.toml 里的 [bili] 段。
@@ -127,6 +132,31 @@ impl SettingsState {
             .lock()
             .ok()
             .and_then(|auth| auth.clone())
+    }
+
+    /// 读取 WebDAV 连接信息：来自 auth.toml 的 [webdav] 段，未配置时返回带默认值的空配置。
+    /// 账号密码只回传本机 WebView，绝不写日志。
+    pub fn get_webdav(&self) -> WebdavConfig {
+        let path = match auth_file_path(&self.get().conf_path) {
+            Ok(path) => path,
+            Err(_) => return WebdavConfig::default().with_defaults(),
+        };
+        read_auth_file(&path)
+            .and_then(|file| file.webdav)
+            .unwrap_or_default()
+            .with_defaults()
+    }
+
+    /// 保存 WebDAV 连接信息到 auth.toml 的 [webdav] 段，保留同文件里的 B 站登录等私有凭据。
+    pub fn set_webdav(&self, cfg: &WebdavConfig) -> Result<(), String> {
+        let path = auth_file_path(&self.get().conf_path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建配置目录失败：{e}"))?;
+        }
+        let mut file = read_auth_file(&path).unwrap_or_default();
+        file.webdav = Some(cfg.clone());
+        write_auth_file(&path, &file)
     }
 
     /// 保存登录 Cookie：解析 uid 与 Cookie 头 → 写独立文件 → 更新内存。
@@ -408,8 +438,9 @@ fn write_auth_file(path: &Path, file: &AuthFile) -> Result<(), String> {
     let body = toml::to_string_pretty(file).map_err(|e| format!("序列化本地凭据失败：{e}"))?;
     let text = format!(
         "# 泉奈工具箱本地私有凭据\n\
-         # 此文件不会被导出/备份，也不要发给任何人；Cookie 等同 B 站账号登录态。\n\
-         # 可在设置页 → 开发者选项 → B 站登录 中修改。\n\n{body}"
+         # 此文件不会被导出/备份，也不要发给任何人；Cookie 等同 B 站账号登录态，\n\
+         # WebDAV 段含服务器地址与账号密码，泄露会危及对应网盘账号。\n\
+         # 可在设置页 → 开发者选项 → B 站登录、配置及同步 → WebDAV 连接 中修改。\n\n{body}"
     );
     std::fs::write(path, text).map_err(|e| format!("写入本地凭据失败：{e}"))
 }
@@ -645,12 +676,40 @@ mod tests {
                 uid: 42,
                 cookie: "DedeUserID=42; SESSDATA=abc".into(),
             }),
+            webdav: None,
         };
         write_auth_file(&path, &file).unwrap();
         let loaded = read_auth_file(&path).unwrap();
         assert_eq!(loaded.bili.as_ref().map(|b| b.uid), Some(42));
         let recovered = load_bili_auth(&dir.join("conf.toml"), &mut Vec::new()).unwrap();
         assert_eq!(recovered.uid, 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auth_toml_roundtrip_keeps_webdav_section_and_bili() {
+        let dir = std::env::temp_dir().join(format!("izuna-webdav-auth-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(AUTH_FILE);
+        let file = AuthFile {
+            bili: Some(AuthBili {
+                uid: 7,
+                cookie: "DedeUserID=7; SESSDATA=abc".into(),
+            }),
+            webdav: Some(WebdavConfig {
+                base_url: "https://dav.example.com".into(),
+                username: "me".into(),
+                password: "secret".into(),
+                remote_dir: "izuna-toolbox".into(),
+                remote_file: "izuna-backup.json".into(),
+            }),
+        };
+        write_auth_file(&path, &file).unwrap();
+        let loaded = read_auth_file(&path).unwrap();
+        let dav = loaded.webdav.expect("应读回 [webdav] 段");
+        assert_eq!(dav.base_url, "https://dav.example.com");
+        assert_eq!(dav.password, "secret");
+        assert_eq!(loaded.bili.as_ref().map(|b| b.uid), Some(7));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

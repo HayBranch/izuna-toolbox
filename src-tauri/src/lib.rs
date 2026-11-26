@@ -287,6 +287,8 @@ pub fn run() {
             settings_cmd::set_bili_cookie,
             settings_cmd::clear_bili_cookie,
             settings_cmd::reset_settings,
+            settings_cmd::get_webdav,
+            settings_cmd::set_webdav,
             settings_cmd::open_log_dir,
             settings_cmd::export_local,
             settings_cmd::export_webdav,

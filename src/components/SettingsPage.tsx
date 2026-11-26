@@ -1,9 +1,9 @@
 /**
  * 设置页：外观 / 开发者选项 / 配置及同步 / 关于（关于固定放在最后一页）。
  *
- * 外观与日志等级都写在 exe 同目录 conf/conf.toml（Rust 侧设置命令），
- * 不再使用 localStorage；WebDAV 账号密码只存 WebView localStorage，
- * 不会跟着 conf.toml 或备份文件导出。
+ * 外观与日志等级写在 exe 同目录 conf/conf.toml；WebDAV 账号密码等私有凭据
+ * 写在同目录 conf/auth.toml（Rust 侧命令读写）。两者都不使用 localStorage，
+ * auth.toml 不会跟着 conf.toml 或备份文件导出。
  */
 import { getVersion } from "@tauri-apps/api/app";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -13,12 +13,14 @@ import {
   clearBiliCookie,
   exportLocal,
   exportWebdav,
+  getWebdav,
   openLogDir,
   openUrl,
   resetSettings,
   saveBiliCookie,
   saveLogLevel,
   saveTheme,
+  saveWebdav,
   selectLocalBackup,
   selectWebdavBackup,
 } from "../api";
@@ -53,12 +55,13 @@ const BTN_DANGER =
 const INPUT =
   "mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200";
 
-const DAV_KEYS = {
-  baseUrl: "izuna.webdav.baseUrl",
-  username: "izuna.webdav.username",
-  password: "izuna.webdav.password",
-  remoteDir: "izuna.webdav.remoteDir",
-  remoteFile: "izuna.webdav.remoteFile",
+/** WebDAV 未配置时的默认值（远程目录与导入文件名沿用历史默认） */
+const DEFAULT_WEBDAV: WebdavConfig = {
+  baseUrl: "",
+  username: "",
+  password: "",
+  remoteDir: "izuna-toolbox",
+  remoteFile: "izuna-backup.json",
 };
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; icon: string; label: string; desc: string }> = [
@@ -79,22 +82,6 @@ const LOG_LEVELS: Array<{ value: LogLevel; label: string; desc: string }> = [
 function errorText(e: unknown): string {
   if (e instanceof Error && e.message) return e.message;
   return String(e) || "未知错误";
-}
-
-function loadWebdav(): WebdavConfig {
-  const read = (key: string) => {
-    try {
-      return localStorage.getItem(key) ?? "";
-    } catch {
-      return "";
-    }
-  };
-  return {
-    baseUrl: read(DAV_KEYS.baseUrl),
-    username: read(DAV_KEYS.username),
-    password: read(DAV_KEYS.password),
-    remoteDir: read(DAV_KEYS.remoteDir) || "izuna-toolbox",
-  };
 }
 
 function defaultBackupName(includeData: boolean): string {
@@ -606,39 +593,56 @@ function SyncTab({
   onThemeModeChange: (mode: ThemeMode) => void;
 }) {
   const [includeData, setIncludeData] = useState(true);
-  const [dav, setDav] = useState<WebdavConfig>(loadWebdav);
-  const [remoteFile, setRemoteFile] = useState(() => {
-    try {
-      return localStorage.getItem(DAV_KEYS.remoteFile) || "izuna-backup.json";
-    } catch {
-      return "izuna-backup.json";
-    }
-  });
+  const [dav, setDav] = useState<WebdavConfig>(DEFAULT_WEBDAV);
+  const [davLoaded, setDavLoaded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  // WebDAV 的三类提示分开存：表单配置错误、导出错误、导入错误，各自就近显示
+  const [davFormError, setDavFormError] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [importError, setImportError] = useState("");
   const [preview, setPreview] = useState<BackupPreview | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
 
-  // WebDAV 连接信息与导入文件名只保存在本机 WebView 存储里，不随备份导出
+  // WebDAV 连接信息从 auth.toml 读取，编辑后防抖写回（不随 conf.toml / 备份导出）
   useEffect(() => {
-    try {
-      localStorage.setItem(DAV_KEYS.baseUrl, dav.baseUrl);
-      localStorage.setItem(DAV_KEYS.username, dav.username);
-      localStorage.setItem(DAV_KEYS.password, dav.password);
-      localStorage.setItem(DAV_KEYS.remoteDir, dav.remoteDir);
-      localStorage.setItem(DAV_KEYS.remoteFile, remoteFile);
-    } catch {
-      // 隐私模式等无法写 localStorage 时忽略，本次仍可使用
-    }
-  }, [dav, remoteFile]);
+    let alive = true;
+    getWebdav()
+      .then((cfg) => {
+        if (!alive) return;
+        setDav({ ...DEFAULT_WEBDAV, ...cfg });
+        setDavLoaded(true);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setDavFormError(`读取 WebDAV 配置失败：${errorText(e)}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-  const updateDav = (patch: Partial<WebdavConfig>) => setDav((prev) => ({ ...prev, ...patch }));
+  useEffect(() => {
+    // 读回成功前不要写，避免把默认空值覆盖掉已保存的配置
+    if (!davLoaded) return;
+    const timer = window.setTimeout(() => {
+      saveWebdav(dav).catch((e) => setDavFormError(`保存 WebDAV 配置失败：${errorText(e)}`));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [dav, davLoaded]);
 
-  const requireDav = (): boolean => {
-    if (dav.baseUrl.trim()) return true;
-    setError("请先填写 WebDAV 服务器地址");
-    return false;
+  const updateDav = (patch: Partial<WebdavConfig>) => {
+    setDavFormError("");
+    setDav((prev) => ({ ...prev, ...patch }));
+  };
+
+  /** WebDAV 操作前置校验，返回错误文案或 null（提示交给各按钮就近显示） */
+  const validateDav = (): string | null => {
+    const base = dav.baseUrl.trim();
+    if (!base) return "请先在上方的「WebDAV 连接」里填写服务器地址";
+    if (!/^https?:\/\//i.test(base)) return "WebDAV 服务器地址必须以 http:// 或 https:// 开头";
+    return null;
   };
 
   const doExportLocal = async () => {
@@ -667,15 +671,20 @@ function SyncTab({
   };
 
   const doExportWebdav = async () => {
-    if (!requireDav()) return;
+    const invalid = validateDav();
+    if (invalid) {
+      setExportError(invalid);
+      return;
+    }
     setError("");
     setNotice("");
+    setExportError("");
     setBusy("export-webdav");
     try {
       const url = await exportWebdav(dav, includeData);
       setNotice(`已上传到 ${url}`);
     } catch (e) {
-      setError(errorText(e));
+      setExportError(errorText(e));
     } finally {
       setBusy(null);
     }
@@ -706,19 +715,24 @@ function SyncTab({
   };
 
   const doImportWebdav = async () => {
-    if (!requireDav()) return;
-    if (!remoteFile.trim()) {
-      setError("请填写要下载的远程文件名");
+    const invalid = validateDav();
+    if (invalid) {
+      setImportError(invalid);
+      return;
+    }
+    if (!dav.remoteFile.trim()) {
+      setImportError("请填写要下载的远程文件名");
       return;
     }
     setError("");
     setNotice("");
+    setImportError("");
     setResult(null);
     setBusy("import-webdav");
     try {
-      setPreview(await selectWebdavBackup(dav, remoteFile.trim()));
+      setPreview(await selectWebdavBackup(dav, dav.remoteFile.trim()));
     } catch (e) {
-      setError(errorText(e));
+      setImportError(errorText(e));
     } finally {
       setBusy(null);
     }
@@ -769,7 +783,8 @@ function SyncTab({
         <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">WebDAV 连接</h3>
         <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
           填写你的 WebDAV 服务器地址与账号。支持坚果云、群晖、Nextcloud 等兼容 WebDAV 的服务。
-          账号密码只保存在本机 WebView 存储里，<strong>不会</strong>写进 conf.toml 或导出文件。
+          改动会自动保存到本机 <code className="font-mono">conf/auth.toml</code>，
+          <strong>不会</strong>写进 conf.toml 或导出文件。
         </p>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <label className="block text-xs text-slate-500 dark:text-slate-400 sm:col-span-2">
@@ -816,8 +831,8 @@ function SyncTab({
             导入时下载的文件名
             <input
               type="text"
-              value={remoteFile}
-              onChange={(e) => setRemoteFile(e.target.value)}
+              value={dav.remoteFile}
+              onChange={(e) => updateDav({ remoteFile: e.target.value })}
               placeholder="izuna-backup.json"
               className={INPUT}
             />
@@ -827,6 +842,11 @@ function SyncTab({
           导出到 WebDAV 时：勾选数据会上传 <code className="font-mono">izuna-backup.json</code>，
           不勾选则上传 <code className="font-mono">conf.toml</code>。
         </p>
+        {davFormError && (
+          <p className="mt-3 rounded-xl border border-rose-500/30 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            {davFormError}
+          </p>
+        )}
       </section>
 
       <section className={CARD}>
@@ -862,6 +882,11 @@ function SyncTab({
             {busy === "export-webdav" ? "上传中…" : "导出到 WebDAV"}
           </button>
         </div>
+        {exportError && (
+          <p className="mt-3 rounded-xl border border-rose-500/30 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            {exportError}
+          </p>
+        )}
       </section>
 
       <section className={CARD}>
@@ -883,6 +908,11 @@ function SyncTab({
             {busy === "import-webdav" ? "下载中…" : "从 WebDAV 导入"}
           </button>
         </div>
+        {importError && (
+          <p className="mt-3 rounded-xl border border-rose-500/30 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            {importError}
+          </p>
+        )}
       </section>
 
       <section className={CARD}>

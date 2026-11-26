@@ -163,12 +163,14 @@ export interface SettingsInfo {
   biliLoggedIn: boolean;
 }
 
-/** WebDAV 连接信息（只保存在 WebView localStorage，不写 conf.toml） */
+/** WebDAV 连接信息（保存在本机 conf/auth.toml 的 [webdav] 段，不写 conf.toml、不进备份） */
 export interface WebdavConfig {
   baseUrl: string;
   username: string;
   password: string;
   remoteDir: string;
+  /** 导入时下载的远程文件名 */
+  remoteFile: string;
 }
 
 /** 导入前预览：只给摘要，不把整份名单传回前端 */

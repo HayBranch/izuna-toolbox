@@ -203,6 +203,12 @@ export const clearBiliCookie = () => invoke<SettingsInfo>("clear_bili_cookie");
 /** 恢复默认设置（外观 auto + 日志 error；不影响 SQLite 数据和 B 站登录） */
 export const resetSettings = () => invoke<SettingsInfo>("reset_settings");
 
+/** 读取 WebDAV 连接信息（conf/auth.toml 的 [webdav] 段，含账号密码，仅本机可见） */
+export const getWebdav = () => invoke<WebdavConfig>("get_webdav");
+
+/** 保存 WebDAV 连接信息到 conf/auth.toml 的 [webdav] 段（不进 conf.toml / 备份） */
+export const saveWebdav = (dav: WebdavConfig) => invoke<void>("set_webdav", { dav });
+
 /** 打开 exe 同目录的 logs/（排查弹幕连接用），返回日志目录绝对路径 */
 export const openLogDir = () => invoke<string>("open_log_dir");
 

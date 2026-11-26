@@ -60,7 +60,7 @@ pub fn open_log_dir(settings: State<'_, SettingsState>) -> Result<String, String
     Ok(dir.display().to_string())
 }
 
-/// 保存 B 站登录 Cookie：解析 uid 后写入 conf/bili_cookie.txt（不进 conf.toml、
+/// 保存 B 站登录 Cookie：解析 uid 后写入 conf/auth.toml 的 [bili] 段（不进 conf.toml、
 /// 不进备份）。成功后重启所有弹幕连接，让新登录态立即生效——服务端只在
 /// 登录连接里下发真实 uid 和未打码昵称，游客连接一律 uid=0 + 打码昵称。
 #[tauri::command]
@@ -88,6 +88,21 @@ pub fn clear_bili_cookie(
 #[tauri::command]
 pub fn reset_settings(settings: State<'_, SettingsState>) -> Result<SettingsInfo, String> {
     settings.reset()
+}
+
+/// 读取 WebDAV 连接信息（conf/auth.toml 的 [webdav] 段），含账号密码，只回传本机前端。
+#[tauri::command]
+pub fn get_webdav(settings: State<'_, SettingsState>) -> WebdavConfig {
+    settings.get_webdav()
+}
+
+/// 保存 WebDAV 连接信息到 conf/auth.toml 的 [webdav] 段，不写 conf.toml、不进备份。
+#[tauri::command]
+pub fn set_webdav(
+    settings: State<'_, SettingsState>,
+    dav: WebdavConfig,
+) -> Result<(), String> {
+    settings.set_webdav(&dav)
 }
 
 // ---------- 导出 ----------
