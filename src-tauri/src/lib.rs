@@ -276,6 +276,7 @@ pub fn run() {
             commands::step_queue_entry,
             commands::set_queue_entry_count,
             commands::rename_queue_entry,
+            commands::set_queue_entry_group,
             commands::delete_queue_entry,
             commands::clear_queue_entries,
             commands::get_queue_status,

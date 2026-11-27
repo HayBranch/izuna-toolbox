@@ -683,10 +683,11 @@ pub fn add_queue_entry(
     queue_id: i64,
     nickname: String,
     count: i64,
+    group: String,
     store: State<'_, Arc<Store>>,
 ) -> Result<Config, String> {
     require_main(&window)?;
-    store.add_queue_entry(queue_id, &nickname, count)?;
+    store.add_queue_entry(queue_id, &nickname, count, &group)?;
     changed(&app, &store)
 }
 
@@ -730,6 +731,20 @@ pub fn rename_queue_entry(
 ) -> Result<Config, String> {
     require_main(&window)?;
     store.rename_queue_entry(queue_id, id, &nickname)?;
+    changed(&app, &store)
+}
+
+#[tauri::command]
+pub fn set_queue_entry_group(
+    app: AppHandle,
+    window: WebviewWindow,
+    queue_id: i64,
+    id: i64,
+    group: String,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    store.set_queue_entry_group(queue_id, id, &group)?;
     changed(&app, &store)
 }
 

@@ -849,15 +849,20 @@ mod imp {
                                         "[弹幕] queue_id={queue_id} room={real_room_id} 游客弹幕（uid=0），按昵称生成虚拟 UID={identity}：昵称={nickname:?}"
                                     );
                                 }
-                                let hit = patterns.iter().position(|(re, _)| re.is_match(&text));
-                                let Some(rule_idx) = hit else {
+                                // 一条弹幕命中多条规则时，每条规则各记一次：同分组会累加
+                                // 到同一行（+N），不同分组则各自 +1，符合「每条命中规则都计数」。
+                                let hit_rules: Vec<usize> = patterns
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, (re, _))| re.is_match(&text).then_some(idx))
+                                    .collect();
+                                if hit_rules.is_empty() {
                                     log::info!(
                                         "[弹幕] queue_id={queue_id} room={real_room_id} 未命中：内容={text:?}（当前 {} 条规则均未匹配）",
                                         patterns.len()
                                     );
                                     continue;
                                 };
-                                let group = patterns[rule_idx].1.clone();
                                 // 去重 key 不再依赖弹幕自带时间戳：B 站部分版本该字段是秒级
                                 // 或缺失后回退成同值，手动连发相同文本会被误判重复、不再 +1。
                                 // 改用「本队列内到达流水号」保证每条到达的弹幕都能独立计数。
@@ -869,12 +874,19 @@ mod imp {
                                     );
                                     continue;
                                 }
-                                matched += 1;
+                                matched += hit_rules.len() as u64;
+                                let groups: Vec<&str> = hit_rules
+                                    .iter()
+                                    .map(|&idx| patterns[idx].1.as_str())
+                                    .collect();
                                 log::info!(
-                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} identity={identity} 昵称={nickname:?} 内容={text:?} 分组={group:?}，待写入={}",
-                                    pending.len() + 1
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +{}：规则={hit_rules:?} identity={identity} 昵称={nickname:?} 内容={text:?} 分组={groups:?}，待写入={}",
+                                    hit_rules.len(),
+                                    pending.len() + hit_rules.len()
                                 );
-                                pending.push((identity, nickname, at, group));
+                                for idx in hit_rules {
+                                    pending.push((identity, nickname.clone(), at, patterns[idx].1.clone()));
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {

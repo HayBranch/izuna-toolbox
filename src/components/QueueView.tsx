@@ -147,7 +147,8 @@ export default function QueueView({
 
   const dim = (pct: number) => hexToRgba(cfg.fontColor, pct);
   const rows = demo ? [...visible, demo] : visible;
-  const groupFont = Math.max(10, Math.round(cfg.fontSize * 0.62));
+  // 0 = 沿用旧的自动字号（整体字号的 62%）；显式设置时按用户配置。
+  const groupFont = cfg.groupFontSize > 0 ? cfg.groupFontSize : Math.max(10, Math.round(cfg.fontSize * 0.62));
 
   return (
     <div ref={boxRef} style={style} {...dragProps} className={fill ? "block" : "inline-block"}>
@@ -184,7 +185,7 @@ export default function QueueView({
             return (
               <li
                 key={enterSeq !== undefined ? `${entry.id}:enter:${enterSeq}` : entry.id}
-                className={`flex items-baseline gap-2 ${enterClass}`}
+                className={`flex items-center gap-2 ${enterClass}`}
               >
                 <span
                   className="shrink-0 text-right font-mono"
@@ -200,12 +201,13 @@ export default function QueueView({
                 </span>
                 {cfg.showGroup && group && (
                   <span
-                    className="inline-flex shrink-0 items-center justify-center rounded-md px-1.5 font-semibold"
+                    className="inline-flex shrink-0 items-center justify-center self-center rounded-md font-semibold"
                     style={{
                       backgroundColor: groupBg,
                       color: readableTextColor(groupBg),
                       fontSize: groupFont,
-                      lineHeight: 1.35,
+                      lineHeight: 1,
+                      padding: "3px 6px",
                       textShadow: "none",
                     }}
                     title={`分组：${group}`}

@@ -203,6 +203,8 @@ pub struct QueueConfig {
     pub enter_effect: String,
     /// 数字 +1 特效：none / bump / zoom / flash / glow / rise
     pub count_effect: String,
+    /// 分组色块字号（px；0 = 按整体字号自动计算）
+    pub group_font_size: u32,
     /// 是否显示弹窗（隐藏 ≠ 删除）
     pub shown: bool,
     pub always_on_top: bool,
@@ -249,6 +251,7 @@ impl Default for QueueConfig {
             mask_nickname: false,
             enter_effect: "none".into(),
             count_effect: "none".into(),
+            group_font_size: 0,
             shown: true,
             always_on_top: true,
             click_through: false,
@@ -482,7 +485,8 @@ CREATE TABLE IF NOT EXISTS queues (
     show_group     INTEGER NOT NULL DEFAULT 0,
     mask_nickname  INTEGER NOT NULL DEFAULT 0,
     enter_effect   TEXT NOT NULL DEFAULT 'none',
-    count_effect   TEXT NOT NULL DEFAULT 'none'
+    count_effect   TEXT NOT NULL DEFAULT 'none',
+    group_font_size INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS queue_entries (
     id          INTEGER PRIMARY KEY,
@@ -497,8 +501,6 @@ CREATE TABLE IF NOT EXISTS queue_entries (
 CREATE INDEX IF NOT EXISTS idx_variables_overlay ON variables(overlay_id);
 CREATE INDEX IF NOT EXISTS idx_computed_overlay  ON computed(overlay_id);
 CREATE INDEX IF NOT EXISTS idx_queue_entries_queue ON queue_entries(queue_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_uid
-    ON queue_entries(queue_id, uid) WHERE uid > 0;
 ";
 
 /// 新人入队特效白名单（与前端下拉框一致）。
@@ -581,6 +583,7 @@ impl Store {
             ("queues", "enter_effect", "ALTER TABLE queues ADD COLUMN enter_effect TEXT NOT NULL DEFAULT 'none'"),
             ("queues", "count_effect", "ALTER TABLE queues ADD COLUMN count_effect TEXT NOT NULL DEFAULT 'none'"),
             ("queue_entries", "group_name", "ALTER TABLE queue_entries ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"),
+            ("queues", "group_font_size", "ALTER TABLE queues ADD COLUMN group_font_size INTEGER NOT NULL DEFAULT 0"),
         ];
         for (table, column, ddl) in queue_columns {
             let exists: i64 = conn
@@ -595,6 +598,17 @@ impl Store {
                     .map_err(|e| format!("迁移 {table}.{column} 失败：{e}"))?;
             }
         }
+
+        // 轻量迁移：v0.1.6 起成员唯一键从「uid」改为「uid + 分组」——同一个人进入
+        // 不同分组时各占一行。旧索引会阻止同一 uid 出现在多个分组，必须先删；
+        // 新索引必须等 group_name 补列之后再建（老库在 CREATE_SQL 阶段还没有这列）。
+        // 手动添加的成员 uid = 0，按昵称区分，不参与唯一索引。
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_queue_entries_uid;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_uid_group
+                 ON queue_entries(queue_id, uid, group_name) WHERE uid <> 0;",
+        )
+        .map_err(|e| format!("迁移 queue_entries 唯一索引失败：{e}"))?;
 
         let store = Self {
             conn: Mutex::new(conn),
@@ -1184,7 +1198,7 @@ impl Store {
         let conn = self.conn.lock().ok()?;
         let mut cfg = conn
             .query_row(
-                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect FROM queues WHERE id = ?1",
+                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size FROM queues WHERE id = ?1",
                 params![id],
                 map_queue_row,
             )
@@ -1211,12 +1225,13 @@ impl Store {
         };
         let enter_effect = normalize_effect(&cfg.enter_effect, ENTER_EFFECTS);
         let count_effect = normalize_effect(&cfg.count_effect, COUNT_EFFECTS);
+        let group_font_size = cfg.group_font_size.clamp(0, 72) as i64;
         let name = cfg.name.trim();
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE queues SET name = ?1, room_id = ?2, poll_secs = ?3, patterns = ?4, sort_mode = ?5, enabled = ?6, max_entries = ?7, font_size = ?8, font_color = ?9, bold = ?10, shadow = ?11, bg_color = ?12, bg_opacity = ?13, max_width = ?14, show_group = ?15, mask_nickname = ?16, enter_effect = ?17, count_effect = ?18, updated_at = ?19 WHERE id = ?20",
+                "UPDATE queues SET name = ?1, room_id = ?2, poll_secs = ?3, patterns = ?4, sort_mode = ?5, enabled = ?6, max_entries = ?7, font_size = ?8, font_color = ?9, bold = ?10, shadow = ?11, bg_color = ?12, bg_opacity = ?13, max_width = ?14, show_group = ?15, mask_nickname = ?16, enter_effect = ?17, count_effect = ?18, group_font_size = ?19, updated_at = ?20 WHERE id = ?21",
                 params![
                     name,
                     room_id,
@@ -1236,6 +1251,7 @@ impl Store {
                     cfg.mask_nickname as i64,
                     enter_effect,
                     count_effect,
+                    group_font_size,
                     now_ms(),
                     cfg.id
                 ],
@@ -1371,8 +1387,14 @@ impl Store {
         Ok(())
     }
 
-    /// 主窗口手动添加成员：已有同名成员则累加次数，否则新建（uid = 0）。
-    pub fn add_queue_entry(&self, queue_id: i64, nickname: &str, count: i64) -> Result<(), String> {
+    /// 主窗口手动添加成员：同一「昵称 + 分组」已有成员则累加次数，否则新建（uid = 0）。
+    pub fn add_queue_entry(
+        &self,
+        queue_id: i64,
+        nickname: &str,
+        count: i64,
+        group: &str,
+    ) -> Result<(), String> {
         let nickname = nickname.trim();
         if nickname.is_empty() {
             return Err("昵称不能为空".into());
@@ -1380,13 +1402,14 @@ impl Store {
         if !self.queue_exists(queue_id) {
             return Err("队列不存在，先创建队列".into());
         }
+        let group = group.trim();
         let add = count.clamp(1, 999_999);
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let existing: Option<i64> = tx
             .query_row(
-                "SELECT id FROM queue_entries WHERE queue_id = ?1 AND nickname = ?2 ORDER BY id LIMIT 1",
-                params![queue_id, nickname],
+                "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = 0 AND nickname = ?2 AND group_name = ?3 ORDER BY id LIMIT 1",
+                params![queue_id, nickname, group],
                 |r| r.get(0),
             )
             .optional()
@@ -1400,8 +1423,8 @@ impl Store {
             .map_err(|e| e.to_string())?;
         } else {
             tx.execute(
-                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at) VALUES (?1, 0, ?2, ?3, ?4, ?4)",
-                params![queue_id, nickname, add, now],
+                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at, group_name) VALUES (?1, 0, ?2, ?3, ?4, ?4, ?5)",
+                params![queue_id, nickname, add, now, group],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -1467,6 +1490,65 @@ impl Store {
         Ok(())
     }
 
+    /// 修改成员所属分组。唯一键是「uid + 分组」：目标分组里若已有同一个人，
+    /// 就把次数合并过去（次数相加、时间取并集）并删除当前行，避免同键两条记录。
+    /// 手动添加的成员（uid = 0）按昵称判断是否同一人。
+    pub fn set_queue_entry_group(
+        &self,
+        queue_id: i64,
+        id: i64,
+        group: &str,
+    ) -> Result<(), String> {
+        let group = group.trim();
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let row: Option<(i64, String, i64, i64, i64)> = tx
+            .query_row(
+                "SELECT uid, nickname, count, first_at, last_at FROM queue_entries WHERE id = ?1 AND queue_id = ?2",
+                params![id, queue_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((uid, nickname, count, first_at, last_at)) = row else {
+            return Err(format!("成员 #{id} 不存在（或不属于该队列）"));
+        };
+        let conflict: Option<i64> = if uid != 0 {
+            tx.query_row(
+                "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = ?2 AND group_name = ?3 AND id <> ?4",
+                params![queue_id, uid, group, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        } else {
+            tx.query_row(
+                "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = 0 AND nickname = ?2 AND group_name = ?3 AND id <> ?4",
+                params![queue_id, nickname, group, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        };
+        if let Some(target) = conflict {
+            tx.execute(
+                "UPDATE queue_entries SET count = MIN(count + ?1, 999999), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3) WHERE id = ?4",
+                params![count, first_at, last_at, target],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM queue_entries WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute(
+                "UPDATE queue_entries SET group_name = ?1 WHERE id = ?2 AND queue_id = ?3",
+                params![group, id, queue_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete_queue_entry(&self, queue_id: i64, id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -1524,18 +1606,19 @@ impl Store {
             }
             let group = group.trim();
             let at = if *at > 0 { *at } else { now };
+            // 唯一键是「uid + 分组」：同一个人进入不同分组时各占一行、各自累计。
             let existing: Option<i64> = tx
                 .query_row(
-                    "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = ?2",
-                    params![queue_id, uid],
+                    "SELECT id FROM queue_entries WHERE queue_id = ?1 AND uid = ?2 AND group_name = ?3",
+                    params![queue_id, uid, group],
                     |r| r.get(0),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
             if let Some(id) = existing {
                 tx.execute(
-                    "UPDATE queue_entries SET count = count + 1, nickname = ?1, group_name = ?4, last_at = MAX(last_at, ?2), first_at = MIN(first_at, ?2) WHERE id = ?3",
-                    params![nickname, at, id, group],
+                    "UPDATE queue_entries SET count = count + 1, nickname = ?1, last_at = MAX(last_at, ?2), first_at = MIN(first_at, ?2) WHERE id = ?3",
+                    params![nickname, at, id],
                 )
                 .map_err(|e| e.to_string())?;
             } else {
@@ -1758,18 +1841,21 @@ fn merge_entries(
         if nickname.is_empty() {
             continue;
         }
+        let group = e.group.trim();
+        // 唯一键是「uid + 分组」；手动成员（uid = 0）按昵称 + 分组匹配。
+        // 游客的虚拟 UID 为负数，导入时按手动成员处理（与旧行为一致）。
         let existing: Option<(i64, i64, i64)> = if e.uid > 0 {
             conn.query_row(
-                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = ?2",
-                params![queue_id, e.uid],
+                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = ?2 AND group_name = ?3",
+                params![queue_id, e.uid, group],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|err| err.to_string())?
         } else {
             conn.query_row(
-                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = 0 AND nickname = ?2",
-                params![queue_id, nickname],
+                "SELECT id, count, first_at FROM queue_entries WHERE queue_id = ?1 AND uid = 0 AND nickname = ?2 AND group_name = ?3",
+                params![queue_id, nickname, group],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
@@ -1779,8 +1865,8 @@ fn merge_entries(
         let last_at = if e.last_at > 0 { e.last_at } else { first_at };
         if let Some((id, _, _)) = existing {
             conn.execute(
-                "UPDATE queue_entries SET count = MAX(count, ?1), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3), group_name = CASE WHEN ?5 <> '' THEN ?5 ELSE group_name END WHERE id = ?4",
-                params![e.count.max(1), first_at, last_at, id, e.group.trim()],
+                "UPDATE queue_entries SET count = MAX(count, ?1), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3) WHERE id = ?4",
+                params![e.count.max(1), first_at, last_at, id],
             )
             .map_err(|err| err.to_string())?;
             merged += 1;
@@ -1795,7 +1881,7 @@ fn merge_entries(
                     e.count.max(1),
                     first_at,
                     last_at,
-                    e.group.trim()
+                    group
                 ],
             )
             .map_err(|err| err.to_string())?;
@@ -1844,8 +1930,8 @@ fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
     }
     let rules = serde_json::to_string(&rules).map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         params![
             cfg.id, cfg.name, cfg.room_id, cfg.poll_secs as i64, rules, cfg.sort_mode,
             cfg.enabled as i64, cfg.max_entries as i64, cfg.shown as i64,
@@ -1854,7 +1940,8 @@ fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
             cfg.bg_color, cfg.bg_opacity as i64, cfg.max_width, cfg.width, cfg.height,
             cfg.created_at, cfg.updated_at, cfg.show_group as i64, cfg.mask_nickname as i64,
             normalize_effect(&cfg.enter_effect, ENTER_EFFECTS),
-            normalize_effect(&cfg.count_effect, COUNT_EFFECTS)
+            normalize_effect(&cfg.count_effect, COUNT_EFFECTS),
+            cfg.group_font_size.clamp(0, 72) as i64
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1898,6 +1985,7 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
         mask_nickname: row.get::<_, i64>(25)? != 0,
         enter_effect: row.get(26)?,
         count_effect: row.get(27)?,
+        group_font_size: row.get::<_, i64>(28)?.clamp(0, 72) as u32,
         entries: vec![],
     })
 }
@@ -1905,7 +1993,7 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
 /// 加载所有排队队列（含成员）。
 fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
     let mut stmt = match conn.prepare(
-        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect FROM queues ORDER BY id",
+        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size FROM queues ORDER BY id",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -1976,6 +2064,7 @@ pub fn default_queue(id: i64, created_at: i64) -> QueueConfig {
         mask_nickname: false,
         enter_effect: "none".into(),
         count_effect: "none".into(),
+        group_font_size: 0,
         shown: true,
         always_on_top: true,
         click_through: false,
@@ -2474,6 +2563,7 @@ mod queue_tests {
         assert!(cfg.rules[0].group.is_empty());
         assert!(!cfg.show_group);
         assert_eq!(cfg.enter_effect, "none");
+        assert_eq!(cfg.group_font_size, 0, "旧备份缺字段时字号应为 0（自动）");
 
         let entry: QueueEntry = serde_json::from_str(
             r#"{"id":1,"uid":1001,"nickname":"阿一","count":1,"firstAt":0,"lastAt":0}"#,
@@ -2509,12 +2599,16 @@ mod queue_tests {
         assert_eq!(q.rules[0].pattern, "排队");
         let all = store.get().queues;
         let q = all.iter().find(|q| q.id == id).unwrap();
-        assert_eq!(q.entries.len(), 2);
-        let one = q.entries.iter().find(|e| e.uid == 1001).unwrap();
-        assert_eq!(one.count, 2);
-        assert_eq!(one.nickname, "阿一改名");
+        // uid + 分组是累计键：同一个人进入「一组」后单独占一行，旧行仍保留。
+        assert_eq!(q.entries.len(), 3);
+        let one = q.entries.iter().find(|e| e.uid == 1001 && e.group.is_empty()).unwrap();
+        assert_eq!(one.count, 1);
+        assert_eq!(one.nickname, "阿一");
         assert_eq!(one.first_at, base);
-        assert_eq!(one.last_at, base + 2000);
+        assert_eq!(one.last_at, base);
+        let grouped = q.entries.iter().find(|e| e.uid == 1001 && e.group == "一组").unwrap();
+        assert_eq!((grouped.count, grouped.nickname.as_str()), (1, "阿一改名"));
+        assert_eq!((grouped.first_at, grouped.last_at), (base + 2000, base + 2000));
 
         store.step_queue_entry(id, one.id, -1).unwrap();
         store.set_queue_entry_count(id, one.id, 7).unwrap();
@@ -2538,15 +2632,17 @@ mod queue_tests {
         ];
         edit.sort_mode = "count".into();
         edit.name = "测试队列".into();
+        edit.group_font_size = 22;
         store.update_queue(&edit).unwrap();
         let q = store.get_queue(id).unwrap();
         assert_eq!(q.name, "测试队列");
         assert_eq!(q.rules.len(), 2);
         assert_eq!(q.rules[1].group, "上车");
         assert_eq!(q.sort_mode, "count");
+        assert_eq!(q.group_font_size, 22);
 
-        store.add_queue_entry(id, "手动成员", 3).unwrap();
-        store.add_queue_entry(id, "手动成员", 2).unwrap();
+        store.add_queue_entry(id, "手动成员", 3, "").unwrap();
+        store.add_queue_entry(id, "手动成员", 2, "").unwrap();
         let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
         let manual = q.entries.iter().find(|e| e.nickname == "手动成员").unwrap();
         assert_eq!(manual.count, 5);
@@ -2558,6 +2654,46 @@ mod queue_tests {
 
         store.delete_queue(id).unwrap();
         assert!(!store.queue_exists(id));
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：一条弹幕命中多条规则时，弹幕线程会为每条命中规则各提交一条 hit。
+    /// 同分组累加到同一行，不同分组各占一行且都 +1。
+    #[test]
+    fn multiple_rule_hits_are_all_counted() {
+        let dir = std::env::temp_dir().join(format!("izuna_multi_hit_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+        let id = store.next_queue_id();
+        store.push_queue(&default_queue(id, now_ms())).unwrap();
+        let base = now_ms() - 1_000;
+
+        // 模拟一条弹幕同时命中两条「一组」规则和一条「二组」规则
+        store
+            .record_queue_matches(
+                id,
+                &[
+                    (1001, "阿一".into(), base, "一组".into()),
+                    (1001, "阿一".into(), base, "一组".into()),
+                    (1001, "阿一".into(), base, "二组".into()),
+                ],
+            )
+            .unwrap();
+
+        let q = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        assert_eq!(q.entries.len(), 2);
+        let first = q.entries.iter().find(|e| e.group == "一组").unwrap();
+        let second = q.entries.iter().find(|e| e.group == "二组").unwrap();
+        assert_eq!((first.count, second.count), (2, 1));
+        assert_eq!(first.uid, 1001);
+        assert_eq!(second.uid, 1001);
+
+        store.delete_queue(id).unwrap();
         drop(store);
         let _ = std::fs::remove_file(&db);
         let _ = std::fs::remove_file(db.with_extension("db-wal"));

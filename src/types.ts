@@ -75,7 +75,7 @@ export interface OverlayConfig {
   computed: ComputedVar[];
 }
 
-/** 排队队列里的一个成员：同一 uid 累计发送次数 */
+/** 排队队列里的一个成员：同一 uid + 分组累计发送次数 */
 export interface QueueEntry {
   id: number;
   /** B 站 uid：>0 真实 UID；<0 游客弹幕按昵称生成的虚拟 UID；0 主窗口手动添加 */
@@ -87,7 +87,7 @@ export interface QueueEntry {
   firstAt: number;
   /** 最近一次排队时间（毫秒时间戳） */
   lastAt: number;
-  /** 最近一次命中规则所属的分组（空 = 未分组） */
+  /** 所属分组（空 = 未分组）；与 uid 一起作为累计键 */
   group: string;
 }
 
@@ -129,6 +129,8 @@ export interface QueueConfig {
   enterEffect: QueueEnterEffect;
   /** 数字 +1 特效 */
   countEffect: QueueCountEffect;
+  /** 分组色块字号（px；0 = 按整体字号自动计算） */
+  groupFontSize: number;
   shown: boolean;
   alwaysOnTop: boolean;
   clickThrough: boolean;

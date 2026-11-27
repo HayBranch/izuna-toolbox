@@ -159,8 +159,8 @@ export const setQueueSize = (width: number, height: number) =>
 export const resizeQueue = (id: number, width: number, height: number) =>
   cfged(invoke<AppConfig>("resize_queue", { id, width, height }));
 
-export const addQueueEntry = (queueId: number, nickname: string, count = 1) =>
-  cfged(invoke<AppConfig>("add_queue_entry", { queueId, nickname, count }));
+export const addQueueEntry = (queueId: number, nickname: string, count = 1, group = "") =>
+  cfged(invoke<AppConfig>("add_queue_entry", { queueId, nickname, count, group }));
 
 export const stepQueueEntry = (queueId: number, id: number, delta: number) =>
   cfged(invoke<AppConfig>("step_queue_entry", { queueId, id, delta }));
@@ -170,6 +170,10 @@ export const setQueueEntryCount = (queueId: number, id: number, count: number) =
 
 export const renameQueueEntry = (queueId: number, id: number, nickname: string) =>
   cfged(invoke<AppConfig>("rename_queue_entry", { queueId, id, nickname }));
+
+/** 修改成员分组；同一 uid + 分组只保留一行（目标分组已有同一成员时次数合并） */
+export const setQueueEntryGroup = (queueId: number, id: number, group: string) =>
+  cfged(invoke<AppConfig>("set_queue_entry_group", { queueId, id, group }));
 
 export const deleteQueueEntry = (queueId: number, id: number) =>
   cfged(invoke<AppConfig>("delete_queue_entry", { queueId, id }));

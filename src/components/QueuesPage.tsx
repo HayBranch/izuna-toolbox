@@ -1,12 +1,15 @@
 /**
  * 排队队列页 —— 两级界面：
  * 1) 列表：每个队列的直播间、匹配规则数、人数、连接状态与显隐开关；
- * 2) 详情：直播间 / 刷新间隔 / 正则 / 排序 / 弹窗样式 / 成员管理 / 预览。
+ * 2) 详情：直播间 / 刷新间隔 / 规则 / 排序 / 弹窗样式 / 成员管理 / 预览。
  *
  * 数据流与其他页面一致：命令写 SQLite → Rust 广播全量配置 → 这里按 id 重新取最新值。
- * 编辑策略（v0.1.3 起）：直播间 / 刷新间隔 / 正则 / 排序 / 弹窗样式只写本地草稿，
+ * 编辑策略（v0.1.3 起）：直播间 / 刷新间隔 / 规则 / 排序 / 弹窗样式只写本地草稿，
  * 点「保存」或按 Ctrl+S 才写入 SQLite；监听、显隐、置顶、穿透、成员增删改仍立即生效。
  * 有未保存修改时返回列表 / 切换页面会弹窗询问「保存 / 丢弃 / 取消」。
+ *
+ * 成员按「uid + 分组」去重：同一个人进入不同分组时各占一行；成员管理里可直接
+ * 修改分组，目标分组已有同一成员时次数合并。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -24,6 +27,7 @@ import {
   setQueueClickThrough,
   setQueueEnabled,
   setQueueEntryCount,
+  setQueueEntryGroup,
   setQueueShown,
   stepQueueEntry,
   updateQueue,
@@ -32,12 +36,13 @@ import {
   COUNT_EFFECTS,
   DEFAULT_GROUP_COLOR,
   ENTER_EFFECTS,
+  groupColorMap,
   nextGroupColor,
   normalizeRules,
   patternErrors,
   sortedQueueEntries,
 } from "../queues";
-import type { AppConfig, QueueConfig, QueueStatus } from "../types";
+import type { AppConfig, QueueConfig, QueueEntry, QueueStatus } from "../types";
 import { formatDateTime } from "../utils";
 import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
@@ -281,6 +286,198 @@ function QueueRow({
   );
 }
 
+/**
+ * 分组输入框：既能直接输入新分组，也能点右侧箭头从已用分组里挑。
+ * 用自定义下拉替代 datalist：已有分组不用先删空输入框，点一下即可切换。
+ */
+function GroupCombo({
+  value,
+  onChange,
+  options,
+  colors,
+  placeholder = "分组（可留空）",
+  ariaLabel,
+  title = "可直接输入新分组；点右侧箭头选择已有分组",
+  onCommit,
+  compact = false,
+  className = "",
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+  colors?: Map<string, string>;
+  placeholder?: string;
+  ariaLabel?: string;
+  title?: string;
+  /** 失焦 / 选中 / 回车时提交（成员行写库用；规则与手动加人传本地状态即可） */
+  onCommit?: (value: string) => void;
+  compact?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  // 点开就列出全部已用分组（当前项打 ✓），避免「不删空输入框就看不到别的分组」。
+  const filtered = options;
+  const canUseNew = value.trim() !== "" && !options.includes(value.trim());
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  const choose = (group: string) => {
+    onChange(group);
+    setOpen(false);
+    onCommit?.(group);
+  };
+
+  return (
+    <div
+      ref={boxRef}
+      className={`relative ${className}`}
+      title={title}
+      onBlur={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+        setOpen(false);
+        onCommit?.(value);
+      }}
+    >
+      <div
+        className={`flex items-center rounded-xl border border-slate-300 bg-white transition focus-within:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 ${
+          compact ? "h-8" : ""
+        }`}
+      >
+        <input
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+            if (e.key === "Enter") {
+              e.preventDefault();
+              setOpen(false);
+              onCommit?.(value);
+            }
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setOpen(true);
+            }
+          }}
+          aria-label={ariaLabel ?? placeholder}
+          placeholder={placeholder}
+          className={`min-w-0 flex-1 bg-transparent text-slate-800 outline-none placeholder:text-slate-400 dark:text-slate-200 dark:placeholder:text-slate-600 ${
+            compact ? "px-2 py-1 text-xs" : "px-2.5 py-2 text-sm"
+          }`}
+        />
+        <button
+          type="button"
+          aria-label="选择已有分组"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className={`shrink-0 px-1.5 text-xs text-slate-400 transition hover:text-indigo-500 dark:text-slate-500 dark:hover:text-indigo-400 ${
+            compact ? "h-7" : "h-9"
+          }`}
+        >
+          ▾
+        </button>
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-xl border border-slate-300 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-900">
+          {filtered.length === 0 && !canUseNew ? (
+            <div className="px-2.5 py-2 text-[11px] text-slate-400 dark:text-slate-600">
+              暂无已用分组，直接输入即可新建
+            </div>
+          ) : (
+            filtered.map((group) => (
+              <button
+                key={group}
+                type="button"
+                // 先阻止输入框失焦，保证点击选项时不会被外层 onBlur 抢先提交
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => choose(group)}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 transition hover:bg-indigo-50 dark:text-slate-200 dark:hover:bg-indigo-500/15"
+              >
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: colors?.get(group) ?? "#64748b" }}
+                />
+                <span className="min-w-0 flex-1 truncate">{group}</span>
+                {group === value && <span className="text-indigo-500">✓</span>}
+              </button>
+            ))
+          )}
+          {canUseNew && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => choose(value.trim())}
+              className="flex w-full items-center gap-2 border-t border-slate-200 px-2.5 py-1.5 text-left text-xs text-indigo-600 transition hover:bg-indigo-50 dark:border-slate-800 dark:text-indigo-400 dark:hover:bg-indigo-500/15"
+            >
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: "#64748b" }} />
+              <span className="min-w-0 flex-1 truncate">使用新分组「{value.trim()}」</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 成员行里的分组单元格：先本地编辑，失焦 / 选中 / 回车时才写库。 */
+function MemberGroupCell({
+  queueId,
+  entry,
+  options,
+  colors,
+  run,
+}: {
+  queueId: number;
+  entry: QueueEntry;
+  options: string[];
+  colors: Map<string, string>;
+  run: Run;
+}) {
+  const [value, setValue] = useState(entry.group);
+  useEffect(() => setValue(entry.group), [entry.id, entry.group]);
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5"
+      title={entry.group ? `分组：${entry.group}` : "未分组"}
+    >
+      <span
+        className="h-2.5 w-2.5 rounded-full"
+        style={
+          entry.group
+            ? { backgroundColor: colors.get(entry.group) ?? "#64748b" }
+            : { border: "1px dashed rgba(148, 163, 184, 0.7)" }
+        }
+      />
+      <GroupCombo
+        compact
+        className="w-28"
+        value={value}
+        onChange={setValue}
+        options={options}
+        colors={colors}
+        placeholder="未分组"
+        ariaLabel={`修改 ${entry.nickname} 的分组`}
+        onCommit={(next) => {
+          const group = next.trim();
+          if (group !== entry.group) void run(setQueueEntryGroup(queueId, entry.id, group));
+          else if (group !== value) setValue(group);
+        }}
+      />
+    </span>
+  );
+}
+
 function QueueEditor({
   queue,
   allQueues,
@@ -303,25 +500,32 @@ function QueueEditor({
   const [failed, setFailed] = useState(false);
   const [nickname, setNickname] = useState("");
   const [addCount, setAddCount] = useState(1);
+  const [addGroup, setAddGroup] = useState("");
   const [preview, setPreview] = useState<QueueEffectPreview | null>(null);
   const previewSeq = useRef(0);
 
   const patternErrs = useMemo(() => patternErrors(draft.rules), [draft.rules]);
   const patternsValid = patternErrs.length === 0 && draft.rules.some((r) => r.pattern.trim() !== "");
+  // 已用分组 = 规则里写过的 + 成员身上已有的；删掉规则后老分组仍可作为候选。
   const groups = useMemo(() => {
     const seen = new Set<string>();
     for (const rule of draft.rules) {
       const group = rule.group.trim();
       if (group) seen.add(group);
     }
-    return [...seen];
-  }, [draft.rules]);
-  const groupListId = `queue-groups-${queue.id}`;
+    for (const entry of queue.entries) {
+      const group = entry.group.trim();
+      if (group) seen.add(group);
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [draft.rules, queue.entries]);
+  // 成员行的小色点跟随当前规则配色；未分组或规则已删除时回退灰色。
+  const groupColors = useMemo(() => groupColorMap(draft.rules), [draft.rules]);
 
   // 正则测试框：输入弹幕文本后延迟 0.5 秒验证是否命中任意一条规则（防止逐字输入时频繁校验）。
   // null 表示尚未验证（输入为空 / 正则有语法错误 / 没有规则）。
   const [testText, setTestText] = useState("");
-  const [testMatched, setTestMatched] = useState<boolean | null>(null);
+  const [testMatched, setTestMatched] = useState<number | null>(null);
   useEffect(() => {
     const value = testText.trim();
     if (!value || patternErrs.length > 0 || !draft.rules.some((r) => r.pattern.trim())) {
@@ -338,7 +542,8 @@ function QueueEditor({
             return [];
           }
         });
-      setTestMatched(regs.some((re) => re.test(value)));
+      // 一条弹幕命中几条规则就记几次，测试框同步显示命中条数。
+      setTestMatched(regs.filter((re) => re.test(value)).length);
     }, 500);
     return () => window.clearTimeout(timer);
   }, [testText, draft.rules, patternErrs]);
@@ -450,7 +655,7 @@ function QueueEditor({
   const addEntry = async () => {
     const name = nickname.trim();
     if (!name) return;
-    const ok = await run(addQueueEntry(queue.id, name, addCount));
+    const ok = await run(addQueueEntry(queue.id, name, addCount, addGroup.trim()));
     if (ok) setNickname("");
   };
 
@@ -546,7 +751,7 @@ function QueueEditor({
       <section className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">直播间与匹配规则</h3>
         <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
-          每分钟收到的弹幕里，文本命中任意一条正则就记一次排队；同一个 UID 累计次数。
+          每分钟收到的弹幕里，文本命中任意一条正则就记一次排队；同一个 UID + 分组累计次数。
           支持 B 站短号，保存后自动解析真实房间号。
         </p>
 
@@ -609,12 +814,6 @@ function QueueEditor({
             </button>
           </div>
 
-          <datalist id={groupListId}>
-            {groups.map((group) => (
-              <option key={group} value={group} />
-            ))}
-          </datalist>
-
           <div className="mt-2 space-y-2">
             {draft.rules.map((rule, index) => {
               const err = patternErrs.find((e) => e.line === index + 1);
@@ -635,14 +834,14 @@ function QueueEditor({
                         : "border-slate-300 focus:border-indigo-500 dark:border-slate-700"
                     }`}
                   />
-                  <input
+                  <GroupCombo
+                    className="w-28"
                     value={rule.group}
-                    onChange={(e) => changeRuleGroup(index, e.target.value)}
-                    list={groupListId}
-                    aria-label={`第 ${index + 1} 条规则的分组`}
-                    placeholder="分组（可留空）"
-                    title="可自行填写；输入已有分组会沿用同组颜色"
-                    className="w-28 rounded-xl border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200 dark:placeholder:text-slate-600"
+                    onChange={(group) => changeRuleGroup(index, group)}
+                    options={groups}
+                    colors={groupColors}
+                    ariaLabel={`第 ${index + 1} 条规则的分组`}
+                    title="可直接填写，也可点 ▾ 从已用分组里选；已有分组会沿用同组颜色"
                   />
                   <input
                     type="color"
@@ -670,7 +869,7 @@ function QueueEditor({
             )}
           </div>
 
-          {/* 正则测试：输入一条弹幕文本，0.5 秒后显示是否命中（✓ 命中 / ✗ 未命中） */}
+          {/* 正则测试：输入一条弹幕文本，0.5 秒后显示命中几条规则（数字 = 命中条数） */}
           <div className="mt-2 flex items-center gap-2">
             <input
               value={testText}
@@ -681,16 +880,22 @@ function QueueEditor({
             />
             <span
               aria-live="polite"
-              title={testMatched === null ? "输入文本后验证" : testMatched ? "命中规则" : "未命中规则"}
-              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-lg font-semibold ${
-                testMatched === true
+              title={
+                testMatched === null
+                  ? "输入文本后验证"
+                  : testMatched > 0
+                    ? `命中 ${testMatched} 条规则（每条各记一次）`
+                    : "未命中规则"
+              }
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold ${
+                testMatched !== null && testMatched > 0
                   ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400"
-                  : testMatched === false
+                  : testMatched === 0
                     ? "bg-rose-100 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400"
                     : "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600"
-              }`}
+              } ${testMatched !== null && testMatched > 1 ? "text-sm" : "text-lg"}`}
             >
-              {testMatched === true ? "✓" : testMatched === false ? "✗" : "·"}
+              {testMatched === null ? "·" : testMatched === 0 ? "✗" : testMatched > 1 ? testMatched : "✓"}
             </span>
           </div>
           {testText.trim() && patternErrs.length > 0 && (
@@ -731,6 +936,14 @@ function QueueEditor({
             max={72}
             integer
             onChange={(v) => patch({ fontSize: v })}
+          />
+          <NumberField
+            label="分组字号（0=自动）"
+            value={draft.groupFontSize}
+            min={0}
+            max={72}
+            integer
+            onChange={(v) => patch({ groupFontSize: v })}
           />
           <ColorField label="文字颜色" value={draft.fontColor} onChange={(v) => patch({ fontColor: v })} />
           <ColorField label="背景颜色" value={draft.bgColor} onChange={(v) => patch({ bgColor: v })} />
@@ -811,8 +1024,8 @@ function QueueEditor({
             </select>
           </label>
           <span className="w-full text-[11px] leading-5 text-slate-400 dark:text-slate-600">
-            显示分组：在昵称与次数之间显示色块，色块中心是分组名；昵称脱敏保留首尾字符。
-            入队 / +1 特效只影响弹窗动画，可在下方「实时预览」里点击按钮试看。
+            显示分组：在昵称与次数之间显示色块（垂直居中），色块中心是分组名；字号 0 = 自动。
+            昵称脱敏保留首尾字符。入队 / +1 特效只影响弹窗动画，可在下方「实时预览」里点击按钮试看。
           </span>
         </div>
 
@@ -875,7 +1088,8 @@ function QueueEditor({
           <div>
             <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">队列成员</h3>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              可删除成员、修改次数或昵称；弹幕实时累加与手动修改都走原子更新，不会互相覆盖。
+              可删除成员、修改次数、昵称或分组；弹幕实时累加与手动修改都走原子更新，不会互相覆盖。
+              同一人进入不同分组时各占一行，目标分组已有同一人则次数合并。
             </p>
           </div>
           {queue.entries.length > 0 && (
@@ -900,6 +1114,20 @@ function QueueEditor({
             />
           </label>
           <NumberField label="次数" value={addCount} min={1} max={99_999} integer onChange={setAddCount} />
+          <label className="block text-xs text-slate-500 dark:text-slate-400">
+            分组（可留空）
+            <div className="mt-1">
+              <GroupCombo
+                className="w-48"
+                value={addGroup}
+                onChange={setAddGroup}
+                options={groups}
+                colors={groupColors}
+                placeholder="选已有分组，或自行输入"
+                ariaLabel="新成员的分组"
+              />
+            </div>
+          </label>
           <button
             type="button"
             onClick={() => void addEntry()}
@@ -909,7 +1137,7 @@ function QueueEditor({
             ＋ 添加成员
           </button>
           <span className="text-[11px] text-slate-400 dark:text-slate-600">
-            同名成员会直接累加次数；手动添加的成员 UID 记为 0。
+            同昵称 + 同分组的成员会累加次数；手动添加的成员 UID 记为 0。
           </span>
         </div>
 
@@ -937,6 +1165,13 @@ function QueueEditor({
                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
                   }}
                   className="w-40 min-w-0 rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm text-slate-800 outline-none transition hover:border-slate-300 focus:border-indigo-500 dark:text-slate-200 dark:hover:border-slate-700"
+                />
+                <MemberGroupCell
+                  queueId={queue.id}
+                  entry={entry}
+                  options={groups}
+                  colors={groupColors}
+                  run={run}
                 />
                 <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400 dark:text-slate-600">
                   {entry.uid > 0 ? `UID ${entry.uid}` : entry.uid < 0 ? "游客" : "手动添加"} · 首次 {formatDateTime(entry.firstAt)} ·
