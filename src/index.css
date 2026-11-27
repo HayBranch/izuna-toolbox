@@ -43,6 +43,67 @@ html.overlay-mode ::-webkit-scrollbar {
   display: none;
 }
 
+/* 排队弹窗特效：入队（整行）与数字 +1（次数）动画。
+   类名与 Rust 白名单 / 前端下拉框一一对应；未选中时不会添加类名。 */
+@keyframes qfx-enter-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes qfx-enter-slide {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes qfx-enter-zoom {
+  from { opacity: 0; transform: scale(0.7); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes qfx-enter-pop {
+  0% { opacity: 0; transform: scale(0.4); }
+  60% { opacity: 1; transform: scale(1.12); }
+  80% { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+@keyframes qfx-count-bump {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-0.38em); }
+  70% { transform: translateY(0.08em); }
+}
+@keyframes qfx-count-zoom {
+  0%, 100% { transform: scale(1); }
+  45% { transform: scale(1.55); }
+}
+@keyframes qfx-count-flash {
+  0%, 100% { opacity: 1; }
+  25%, 75% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+@keyframes qfx-count-glow {
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 0 6px currentColor) brightness(1.4); }
+}
+@keyframes qfx-count-rise {
+  from { opacity: 0; transform: translateY(0.5em); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.qfx-enter-fade { animation: qfx-enter-fade 0.55s ease-out both; }
+.qfx-enter-slide { animation: qfx-enter-slide 0.55s ease-out both; }
+.qfx-enter-zoom { animation: qfx-enter-zoom 0.55s ease-out both; }
+.qfx-enter-pop { animation: qfx-enter-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+.qfx-count-bump,
+.qfx-count-zoom,
+.qfx-count-flash,
+.qfx-count-glow,
+.qfx-count-rise {
+  display: inline-block;
+}
+.qfx-count-bump { animation: qfx-count-bump 0.5s ease-out; }
+.qfx-count-zoom { animation: qfx-count-zoom 0.45s ease-out; }
+.qfx-count-flash { animation: qfx-count-flash 0.5s ease-in-out; }
+.qfx-count-glow { animation: qfx-count-glow 0.6s ease-in-out; }
+.qfx-count-rise { animation: qfx-count-rise 0.5s ease-out both; }
+
 /* 细滚动条，桌面应用观感 */
 ::-webkit-scrollbar {
   width: 8px;

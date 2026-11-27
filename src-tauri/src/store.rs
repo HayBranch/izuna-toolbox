@@ -22,6 +22,9 @@ use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+/// 新规则没有指定颜色时的默认分组色（与前端色板第一项一致）。
+pub const DEFAULT_GROUP_COLOR: &str = "#3b82f6";
+
 /// 用户自定义变量（手动维护数值的"框框"），属于某一浮窗。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -102,6 +105,57 @@ pub struct OverlayConfig {
     pub computed: Vec<ComputedVar>,
 }
 
+/// 一条匹配规则：正则 + 所属分组 + 分组颜色。
+///
+/// 兼容旧数据：反序列化时既接受 `"排队"` 这样的纯字符串（v0.1.5 及更早的
+/// 数据库 / 备份），也接受 `{ "pattern": ..., "group": ..., "color": ... }`。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QueueRule {
+    pub pattern: String,
+    /// 命中这条规则时给成员打的组名（空 = 不分组）
+    pub group: String,
+    /// 分组色块颜色（#RRGGBB）
+    pub color: String,
+}
+
+impl<'de> Deserialize<'de> for QueueRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Rule {
+                #[serde(default)]
+                pattern: String,
+                #[serde(default)]
+                group: String,
+                #[serde(default)]
+                color: String,
+            },
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Text(pattern) => Ok(QueueRule {
+                pattern,
+                group: String::new(),
+                color: String::new(),
+            }),
+            Repr::Rule {
+                pattern,
+                group,
+                color,
+            } => Ok(QueueRule {
+                pattern,
+                group,
+                color,
+            }),
+        }
+    }
+}
+
 /// 排队队列里的一个成员：同一个 uid 累计发送次数。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -116,6 +170,8 @@ pub struct QueueEntry {
     pub first_at: i64,
     /// 最近一次排队时间（毫秒时间戳）
     pub last_at: i64,
+    /// 最近一次命中规则所属的分组（空 = 未分组）
+    pub group: String,
 }
 
 /// 一个排队队列 = 自己独立的直播间、正则、排序与弹窗样式。
@@ -128,14 +184,25 @@ pub struct QueueConfig {
     pub room_id: i64,
     /// 弹幕批量写入 / 界面刷新间隔（秒）
     pub poll_secs: u32,
-    /// 匹配弹幕文本的正则（任一命中即计数）
-    pub patterns: Vec<String>,
+    /// 匹配弹幕文本的规则（任一命中即计数；每条规则带分组与颜色）
+    ///
+    /// 反序列化时兼容旧字段名 `patterns`（纯字符串数组）。
+    #[serde(alias = "patterns")]
+    pub rules: Vec<QueueRule>,
     /// `time` 按首次发送时间（先到先得）| `count` 按发送次数（多到少）
     pub sort_mode: String,
     /// 是否监听弹幕
     pub enabled: bool,
     /// 弹窗最多显示多少人
     pub max_entries: u32,
+    /// 弹窗里是否在昵称后显示分组色块
+    pub show_group: bool,
+    /// 弹窗里是否对昵称做脱敏（保留首尾字符）
+    pub mask_nickname: bool,
+    /// 新人入队特效：none / fade / slide / zoom / pop
+    pub enter_effect: String,
+    /// 数字 +1 特效：none / bump / zoom / flash / glow / rise
+    pub count_effect: String,
     /// 是否显示弹窗（隐藏 ≠ 删除）
     pub shown: bool,
     pub always_on_top: bool,
@@ -170,10 +237,18 @@ impl Default for QueueConfig {
             name: String::new(),
             room_id: 0,
             poll_secs: 3,
-            patterns: vec!["排队".into()],
+            rules: vec![QueueRule {
+                pattern: "排队".into(),
+                group: String::new(),
+                color: DEFAULT_GROUP_COLOR.into(),
+            }],
             sort_mode: "time".into(),
             enabled: true,
             max_entries: 20,
+            show_group: false,
+            mask_nickname: false,
+            enter_effect: "none".into(),
+            count_effect: "none".into(),
             shown: true,
             always_on_top: true,
             click_through: false,
@@ -403,7 +478,11 @@ CREATE TABLE IF NOT EXISTS queues (
     width          INTEGER NOT NULL DEFAULT 0,
     height         INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
-    updated_at     INTEGER NOT NULL DEFAULT 0
+    updated_at     INTEGER NOT NULL DEFAULT 0,
+    show_group     INTEGER NOT NULL DEFAULT 0,
+    mask_nickname  INTEGER NOT NULL DEFAULT 0,
+    enter_effect   TEXT NOT NULL DEFAULT 'none',
+    count_effect   TEXT NOT NULL DEFAULT 'none'
 );
 CREATE TABLE IF NOT EXISTS queue_entries (
     id          INTEGER PRIMARY KEY,
@@ -412,7 +491,8 @@ CREATE TABLE IF NOT EXISTS queue_entries (
     nickname    TEXT NOT NULL,
     count       INTEGER NOT NULL DEFAULT 1,
     first_at    INTEGER NOT NULL,
-    last_at     INTEGER NOT NULL
+    last_at     INTEGER NOT NULL,
+    group_name  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_variables_overlay ON variables(overlay_id);
 CREATE INDEX IF NOT EXISTS idx_computed_overlay  ON computed(overlay_id);
@@ -420,6 +500,34 @@ CREATE INDEX IF NOT EXISTS idx_queue_entries_queue ON queue_entries(queue_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_entries_uid
     ON queue_entries(queue_id, uid) WHERE uid > 0;
 ";
+
+/// 新人入队特效白名单（与前端下拉框一致）。
+const ENTER_EFFECTS: &[&str] = &["none", "fade", "slide", "zoom", "pop"];
+/// 数字 +1 特效白名单。
+const COUNT_EFFECTS: &[&str] = &["none", "bump", "zoom", "flash", "glow", "rise"];
+
+/// 特效名不在白名单里时回退 `none`，避免前端传入任意 CSS 类名。
+fn normalize_effect(value: &str, allowed: &[&str]) -> String {
+    let value = value.trim();
+    if allowed.contains(&value) {
+        value.to_string()
+    } else {
+        "none".to_string()
+    }
+}
+
+/// 分组颜色统一成小写 `#rrggbb`；非法值回退默认色。
+fn normalize_color(color: &str) -> String {
+    let color = color.trim();
+    if color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        color.to_ascii_lowercase()
+    } else {
+        DEFAULT_GROUP_COLOR.to_string()
+    }
+}
 
 impl Store {
     /// 打开数据库、建表；首次使用时种入示例数据。
@@ -462,6 +570,29 @@ impl Store {
                     "ALTER TABLE overlays ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
                 ))
                 .map_err(|e| format!("迁移 overlays.{column} 失败：{e}"))?;
+            }
+        }
+
+        // 轻量迁移：v0.1.6 起排队规则带分组/颜色，弹窗可显示分组、脱敏昵称与入队特效。
+        // 老库补列（新库建表时已带列，这里跳过）。
+        let queue_columns = [
+            ("queues", "show_group", "ALTER TABLE queues ADD COLUMN show_group INTEGER NOT NULL DEFAULT 0"),
+            ("queues", "mask_nickname", "ALTER TABLE queues ADD COLUMN mask_nickname INTEGER NOT NULL DEFAULT 0"),
+            ("queues", "enter_effect", "ALTER TABLE queues ADD COLUMN enter_effect TEXT NOT NULL DEFAULT 'none'"),
+            ("queues", "count_effect", "ALTER TABLE queues ADD COLUMN count_effect TEXT NOT NULL DEFAULT 'none'"),
+            ("queue_entries", "group_name", "ALTER TABLE queue_entries ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"),
+        ];
+        for (table, column, ddl) in queue_columns {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    params![table, column],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("检查表结构失败：{e}"))?;
+            if exists == 0 {
+                conn.execute_batch(ddl)
+                    .map_err(|e| format!("迁移 {table}.{column} 失败：{e}"))?;
             }
         }
 
@@ -1053,7 +1184,7 @@ impl Store {
         let conn = self.conn.lock().ok()?;
         let mut cfg = conn
             .query_row(
-                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at FROM queues WHERE id = ?1",
+                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect FROM queues WHERE id = ?1",
                 params![id],
                 map_queue_row,
             )
@@ -1063,10 +1194,10 @@ impl Store {
         Some(cfg)
     }
 
-    /// 更新队列的直播间、正则、排序与弹窗样式（不动位置与显隐开关）。
+    /// 更新队列的直播间、规则、排序与弹窗样式（不动位置与显隐开关）。
     pub fn update_queue(&self, cfg: &QueueConfig) -> Result<(), String> {
-        let patterns = Self::validate_patterns(&cfg.patterns)?;
-        let patterns_json = serde_json::to_string(&patterns).map_err(|e| e.to_string())?;
+        let rules = Self::validate_rules(&cfg.rules)?;
+        let rules_json = serde_json::to_string(&rules).map_err(|e| e.to_string())?;
         let sort_mode = if cfg.sort_mode == "count" { "count" } else { "time" };
         let room_id = cfg.room_id.max(0);
         let poll_secs = cfg.poll_secs.clamp(1, 60) as i64;
@@ -1078,17 +1209,19 @@ impl Store {
         } else {
             cfg.max_width.clamp(80, 3000)
         };
+        let enter_effect = normalize_effect(&cfg.enter_effect, ENTER_EFFECTS);
+        let count_effect = normalize_effect(&cfg.count_effect, COUNT_EFFECTS);
         let name = cfg.name.trim();
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE queues SET name = ?1, room_id = ?2, poll_secs = ?3, patterns = ?4, sort_mode = ?5, enabled = ?6, max_entries = ?7, font_size = ?8, font_color = ?9, bold = ?10, shadow = ?11, bg_color = ?12, bg_opacity = ?13, max_width = ?14, updated_at = ?15 WHERE id = ?16",
+                "UPDATE queues SET name = ?1, room_id = ?2, poll_secs = ?3, patterns = ?4, sort_mode = ?5, enabled = ?6, max_entries = ?7, font_size = ?8, font_color = ?9, bold = ?10, shadow = ?11, bg_color = ?12, bg_opacity = ?13, max_width = ?14, show_group = ?15, mask_nickname = ?16, enter_effect = ?17, count_effect = ?18, updated_at = ?19 WHERE id = ?20",
                 params![
                     name,
                     room_id,
                     poll_secs,
-                    patterns_json,
+                    rules_json,
                     sort_mode,
                     cfg.enabled as i64,
                     max_entries,
@@ -1099,6 +1232,10 @@ impl Store {
                     cfg.bg_color,
                     bg_opacity,
                     max_width,
+                    cfg.show_group as i64,
+                    cfg.mask_nickname as i64,
+                    enter_effect,
+                    count_effect,
                     now_ms(),
                     cfg.id
                 ],
@@ -1110,16 +1247,21 @@ impl Store {
         Ok(())
     }
 
-    /// 校验并清洗正则：逐行去掉空白行，全部编译一遍；至少保留一条。
-    pub fn validate_patterns(patterns: &[String]) -> Result<Vec<String>, String> {
+    /// 校验并清洗规则：去掉空正则行，全部编译一遍；至少保留一条。
+    /// 颜色统一成小写 `#rrggbb`，非法值回退默认色。
+    pub fn validate_rules(rules: &[QueueRule]) -> Result<Vec<QueueRule>, String> {
         let mut cleaned = Vec::new();
-        for (i, p) in patterns.iter().enumerate() {
-            let p = p.trim();
-            if p.is_empty() {
+        for (i, r) in rules.iter().enumerate() {
+            let pattern = r.pattern.trim();
+            if pattern.is_empty() {
                 continue;
             }
-            Regex::new(p).map_err(|e| format!("第 {} 条正则不合法：{e}", i + 1))?;
-            cleaned.push(p.to_string());
+            Regex::new(pattern).map_err(|e| format!("第 {} 条正则不合法：{e}", i + 1))?;
+            cleaned.push(QueueRule {
+                pattern: pattern.to_string(),
+                group: r.group.trim().to_string(),
+                color: normalize_color(&r.color),
+            });
         }
         if cleaned.is_empty() {
             return Err("至少保留一个正则表达式（例如：排队）".into());
@@ -1346,11 +1488,12 @@ impl Store {
     }
 
     /// 弹幕工作线程匹配到命中后调用：同一 uid 累加次数，新用户插入。
+    /// `hits` 每项是 `(uid, 昵称, 弹幕时间, 命中规则的分组)`；分组为空表示不分组。
     /// 返回实际写入的命中条数（0 = 队列已在其它窗口被删除，忽略）。
     pub fn record_queue_matches(
         &self,
         queue_id: i64,
-        hits: &[(i64, String, i64)],
+        hits: &[(i64, String, i64, String)],
     ) -> Result<usize, String> {
         if hits.is_empty() {
             return Ok(0);
@@ -1368,7 +1511,7 @@ impl Store {
         }
         let now = now_ms();
         let mut changed = 0usize;
-        for (uid, nickname, at) in hits {
+        for (uid, nickname, at, group) in hits {
             // uid==0 是「手动添加成员」的占位值，不接受弹幕写入；
             // 负数 uid 是弹幕层为游客（B 站返回 uid=0）按昵称生成的虚拟 UID，
             // 必须放行，否则游客发的弹幕永远不 +1。
@@ -1379,6 +1522,7 @@ impl Store {
             if nickname.is_empty() {
                 continue;
             }
+            let group = group.trim();
             let at = if *at > 0 { *at } else { now };
             let existing: Option<i64> = tx
                 .query_row(
@@ -1390,14 +1534,14 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             if let Some(id) = existing {
                 tx.execute(
-                    "UPDATE queue_entries SET count = count + 1, nickname = ?1, last_at = MAX(last_at, ?2), first_at = MIN(first_at, ?2) WHERE id = ?3",
-                    params![nickname, at, id],
+                    "UPDATE queue_entries SET count = count + 1, nickname = ?1, group_name = ?4, last_at = MAX(last_at, ?2), first_at = MIN(first_at, ?2) WHERE id = ?3",
+                    params![nickname, at, id, group],
                 )
                 .map_err(|e| e.to_string())?;
             } else {
                 tx.execute(
-                    "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at) VALUES (?1, ?2, ?3, 1, ?4, ?4)",
-                    params![queue_id, uid, nickname, at],
+                    "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at, group_name) VALUES (?1, ?2, ?3, 1, ?4, ?4, ?5)",
+                    params![queue_id, uid, nickname, at, group],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1635,22 +1779,23 @@ fn merge_entries(
         let last_at = if e.last_at > 0 { e.last_at } else { first_at };
         if let Some((id, _, _)) = existing {
             conn.execute(
-                "UPDATE queue_entries SET count = MAX(count, ?1), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3) WHERE id = ?4",
-                params![e.count.max(1), first_at, last_at, id],
+                "UPDATE queue_entries SET count = MAX(count, ?1), first_at = MIN(first_at, ?2), last_at = MAX(last_at, ?3), group_name = CASE WHEN ?5 <> '' THEN ?5 ELSE group_name END WHERE id = ?4",
+                params![e.count.max(1), first_at, last_at, id, e.group.trim()],
             )
             .map_err(|err| err.to_string())?;
             merged += 1;
         } else {
             conn.execute(
-                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at, group_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     queue_id,
                     e.uid.max(0),
                     nickname,
                     e.count.max(1),
                     first_at,
-                    last_at
+                    last_at,
+                    e.group.trim()
                 ],
             )
             .map_err(|err| err.to_string())?;
@@ -1679,17 +1824,37 @@ fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> 
 
 /// 写入一条排队队列记录。
 fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
-    let patterns = serde_json::to_string(&cfg.patterns).map_err(|e| e.to_string())?;
+    // 导入旧备份时规则可能缺颜色 / 带空白：这里做一次宽松清洗，保证落库格式统一。
+    let mut rules: Vec<QueueRule> = cfg
+        .rules
+        .iter()
+        .map(|r| QueueRule {
+            pattern: r.pattern.trim().to_string(),
+            group: r.group.trim().to_string(),
+            color: normalize_color(&r.color),
+        })
+        .filter(|r| !r.pattern.is_empty())
+        .collect();
+    if rules.is_empty() {
+        rules.push(QueueRule {
+            pattern: "排队".into(),
+            group: String::new(),
+            color: DEFAULT_GROUP_COLOR.into(),
+        });
+    }
+    let rules = serde_json::to_string(&rules).map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         params![
-            cfg.id, cfg.name, cfg.room_id, cfg.poll_secs as i64, patterns, cfg.sort_mode,
+            cfg.id, cfg.name, cfg.room_id, cfg.poll_secs as i64, rules, cfg.sort_mode,
             cfg.enabled as i64, cfg.max_entries as i64, cfg.shown as i64,
             cfg.always_on_top as i64, cfg.click_through as i64, cfg.x, cfg.y,
             cfg.font_size as i64, cfg.font_color, cfg.bold as i64, cfg.shadow as i64,
             cfg.bg_color, cfg.bg_opacity as i64, cfg.max_width, cfg.width, cfg.height,
-            cfg.created_at, cfg.updated_at
+            cfg.created_at, cfg.updated_at, cfg.show_group as i64, cfg.mask_nickname as i64,
+            normalize_effect(&cfg.enter_effect, ENTER_EFFECTS),
+            normalize_effect(&cfg.count_effect, COUNT_EFFECTS)
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1703,7 +1868,13 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
         name: row.get(1)?,
         room_id: row.get(2)?,
         poll_secs: row.get::<_, i64>(3)?.max(1) as u32,
-        patterns: serde_json::from_str(&patterns).unwrap_or_else(|_| vec!["排队".into()]),
+        rules: serde_json::from_str(&patterns).unwrap_or_else(|_| {
+            vec![QueueRule {
+                pattern: "排队".into(),
+                group: String::new(),
+                color: DEFAULT_GROUP_COLOR.into(),
+            }]
+        }),
         sort_mode: row.get(5)?,
         enabled: row.get::<_, i64>(6)? != 0,
         max_entries: row.get::<_, i64>(7)?.max(1) as u32,
@@ -1723,6 +1894,10 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
         height: row.get(21)?,
         created_at: row.get(22)?,
         updated_at: row.get(23)?,
+        show_group: row.get::<_, i64>(24)? != 0,
+        mask_nickname: row.get::<_, i64>(25)? != 0,
+        enter_effect: row.get(26)?,
+        count_effect: row.get(27)?,
         entries: vec![],
     })
 }
@@ -1730,7 +1905,7 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
 /// 加载所有排队队列（含成员）。
 fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
     let mut stmt = match conn.prepare(
-        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at FROM queues ORDER BY id",
+        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect FROM queues ORDER BY id",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -1756,7 +1931,7 @@ fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
 
 fn load_queue_entries(conn: &Connection, queue_id: i64) -> Vec<QueueEntry> {
     let mut stmt = match conn.prepare(
-        "SELECT id, uid, nickname, count, first_at, last_at FROM queue_entries WHERE queue_id = ?1 ORDER BY id",
+        "SELECT id, uid, nickname, count, first_at, last_at, group_name FROM queue_entries WHERE queue_id = ?1 ORDER BY id",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -1772,6 +1947,7 @@ fn load_queue_entries(conn: &Connection, queue_id: i64) -> Vec<QueueEntry> {
             count: row.get(3)?,
             first_at: row.get(4)?,
             last_at: row.get(5)?,
+            group: row.get(6)?,
         })
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -1788,10 +1964,18 @@ pub fn default_queue(id: i64, created_at: i64) -> QueueConfig {
         name: "排队队列".into(),
         room_id: 0,
         poll_secs: 3,
-        patterns: vec!["排队".into()],
+        rules: vec![QueueRule {
+            pattern: "排队".into(),
+            group: String::new(),
+            color: DEFAULT_GROUP_COLOR.into(),
+        }],
         sort_mode: "time".into(),
         enabled: true,
         max_entries: 20,
+        show_group: false,
+        mask_nickname: false,
+        enter_effect: "none".into(),
+        count_effect: "none".into(),
         shown: true,
         always_on_top: true,
         click_through: false,
@@ -2198,7 +2382,7 @@ mod tests {
         queue.name = "直播排队".into();
         store.push_queue(&queue).unwrap();
         store
-            .record_queue_matches(qid, &[(1001, "阿一".into(), now_ms())])
+            .record_queue_matches(qid, &[(1001, "阿一".into(), now_ms(), String::new())])
             .unwrap();
 
         let mut backup_overlay = store.get().overlays[0].clone();
@@ -2279,6 +2463,25 @@ mod tests {
 mod queue_tests {
     use super::*;
 
+    /// 回归：v0.1.5 及更早的备份 / 数据库里规则是纯字符串数组，
+    /// 新版本必须能原样读入（分组、颜色留空），不能因为格式变化丢规则。
+    #[test]
+    fn legacy_patterns_json_is_accepted() {
+        let legacy = r#"{"id":1,"name":"旧队列","patterns":["排队","^上车$"],"entries":[]}"#;
+        let cfg: QueueConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.rules.len(), 2);
+        assert_eq!(cfg.rules[0].pattern, "排队");
+        assert!(cfg.rules[0].group.is_empty());
+        assert!(!cfg.show_group);
+        assert_eq!(cfg.enter_effect, "none");
+
+        let entry: QueueEntry = serde_json::from_str(
+            r#"{"id":1,"uid":1001,"nickname":"阿一","count":1,"firstAt":0,"lastAt":0}"#,
+        )
+        .unwrap();
+        assert!(entry.group.is_empty());
+    }
+
     #[test]
     fn queue_crud_roundtrip() {
         let dir = std::env::temp_dir().join(format!("izuna_queue_test_{}", now_ms()));
@@ -2294,15 +2497,16 @@ mod queue_tests {
         store
             .record_queue_matches(
                 id,
-                &[(1001, "阿一".into(), base), (1002, "阿二".into(), base + 1000)],
+                &[(1001, "阿一".into(), base, String::new()), (1002, "阿二".into(), base + 1000, String::new())],
             )
             .unwrap();
         store
-            .record_queue_matches(id, &[(1001, "阿一改名".into(), base + 2000)])
+            .record_queue_matches(id, &[(1001, "阿一改名".into(), base + 2000, "一组".into())])
             .unwrap();
 
         let q = store.get_queue(id).unwrap();
-        assert_eq!(q.patterns, vec!["排队".to_string()]);
+        assert_eq!(q.rules.len(), 1);
+        assert_eq!(q.rules[0].pattern, "排队");
         let all = store.get().queues;
         let q = all.iter().find(|q| q.id == id).unwrap();
         assert_eq!(q.entries.len(), 2);
@@ -2320,13 +2524,25 @@ mod queue_tests {
         assert_eq!((one.count, one.nickname.as_str()), (7, "新名字"));
 
         let mut edit = q.clone();
-        edit.patterns = vec!["排队".into(), "^上车$".into()];
+        edit.rules = vec![
+            QueueRule {
+                pattern: "排队".into(),
+                group: "候车".into(),
+                color: "#3b82f6".into(),
+            },
+            QueueRule {
+                pattern: "^上车$".into(),
+                group: "上车".into(),
+                color: "#ef4444".into(),
+            },
+        ];
         edit.sort_mode = "count".into();
         edit.name = "测试队列".into();
         store.update_queue(&edit).unwrap();
         let q = store.get_queue(id).unwrap();
         assert_eq!(q.name, "测试队列");
-        assert_eq!(q.patterns.len(), 2);
+        assert_eq!(q.rules.len(), 2);
+        assert_eq!(q.rules[1].group, "上车");
         assert_eq!(q.sort_mode, "count");
 
         store.add_queue_entry(id, "手动成员", 3).unwrap();
@@ -2368,19 +2584,19 @@ mod queue_tests {
         // 两个队列各自写入，且共用同一个 uid：计数与昵称都应各自独立
         assert_eq!(
             store
-                .record_queue_matches(id_a, &[(1001, "阿一".into(), base)])
+                .record_queue_matches(id_a, &[(1001, "阿一".into(), base, String::new())])
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .record_queue_matches(id_b, &[(1001, "阿一".into(), base)])
+                .record_queue_matches(id_b, &[(1001, "阿一".into(), base, String::new())])
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .record_queue_matches(id_a, &[(1001, "阿一改名".into(), base + 1)])
+                .record_queue_matches(id_a, &[(1001, "阿一改名".into(), base + 1, String::new())])
                 .unwrap(),
             1
         );
@@ -2401,14 +2617,14 @@ mod queue_tests {
         store.delete_queue(id_a).unwrap();
         assert_eq!(
             store
-                .record_queue_matches(id_a, &[(1002, "已删队列".into(), base)])
+                .record_queue_matches(id_a, &[(1002, "已删队列".into(), base, String::new())])
                 .unwrap(),
             0,
             "已删除队列的命中应被安全忽略"
         );
         assert_eq!(
             store
-                .record_queue_matches(id_b, &[(1001, "阿一".into(), base + 2)])
+                .record_queue_matches(id_b, &[(1001, "阿一".into(), base + 2, String::new())])
                 .unwrap(),
             1
         );
@@ -2440,20 +2656,20 @@ mod queue_tests {
         // 负数虚拟 UID（游客「泉***」）：两次应累加成一条、count=2
         assert_eq!(
             store
-                .record_queue_matches(id, &[(-1234567, "泉***".into(), base)])
+                .record_queue_matches(id, &[(-1234567, "泉***".into(), base, String::new())])
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .record_queue_matches(id, &[(-1234567, "泉***".into(), base + 1)])
+                .record_queue_matches(id, &[(-1234567, "泉***".into(), base + 1, String::new())])
                 .unwrap(),
             1
         );
         // uid=0 是手动添加占位，仍拒绝
         assert_eq!(
             store
-                .record_queue_matches(id, &[(0, "手动添加".into(), base)])
+                .record_queue_matches(id, &[(0, "手动添加".into(), base, String::new())])
                 .unwrap(),
             0
         );

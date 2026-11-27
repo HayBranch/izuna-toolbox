@@ -28,12 +28,20 @@ import {
   stepQueueEntry,
   updateQueue,
 } from "../api";
-import { patternErrors, splitPatterns, sortedQueueEntries } from "../queues";
+import {
+  COUNT_EFFECTS,
+  DEFAULT_GROUP_COLOR,
+  ENTER_EFFECTS,
+  nextGroupColor,
+  normalizeRules,
+  patternErrors,
+  sortedQueueEntries,
+} from "../queues";
 import type { AppConfig, QueueConfig, QueueStatus } from "../types";
 import { formatDateTime } from "../utils";
 import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
-import QueueView from "./QueueView";
+import QueueView, { type QueueEffectPreview } from "./QueueView";
 import { useUnsavedGuard } from "./UnsavedGuard";
 
 type Run = (p: Promise<unknown>) => Promise<boolean>;
@@ -221,7 +229,7 @@ function QueueRow({
               {" · "}
               {queue.sortMode === "count" ? "按发送次数" : "按发送时间"}
               {" · "}
-              {queue.entries.length} 人 · 间隔 {queue.pollSecs}s · 规则 {queue.patterns.length} 条
+              {queue.entries.length} 人 · 间隔 {queue.pollSecs}s · 规则 {queue.rules.length} 条
               {" · "}修改 {formatDateTime(updated)}
             </span>
           </span>
@@ -290,33 +298,42 @@ function QueueEditor({
 }) {
   const guard = useUnsavedGuard();
   const [draft, setDraft] = useState(queue);
-  const [patternText, setPatternText] = useState(queue.patterns.join("\n"));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   const [nickname, setNickname] = useState("");
   const [addCount, setAddCount] = useState(1);
+  const [preview, setPreview] = useState<QueueEffectPreview | null>(null);
+  const previewSeq = useRef(0);
 
-  const patternList = useMemo(() => splitPatterns(patternText), [patternText]);
-  const patternErrs = useMemo(() => patternErrors(patternList), [patternList]);
-  const patternsValid = patternErrs.length === 0 && patternList.some((p) => p.trim() !== "");
+  const patternErrs = useMemo(() => patternErrors(draft.rules), [draft.rules]);
+  const patternsValid = patternErrs.length === 0 && draft.rules.some((r) => r.pattern.trim() !== "");
+  const groups = useMemo(() => {
+    const seen = new Set<string>();
+    for (const rule of draft.rules) {
+      const group = rule.group.trim();
+      if (group) seen.add(group);
+    }
+    return [...seen];
+  }, [draft.rules]);
+  const groupListId = `queue-groups-${queue.id}`;
 
-  // 正则测试框：输入弹幕文本后延迟 0.5 秒验证是否命中当前正则（防止逐字输入时频繁校验）。
+  // 正则测试框：输入弹幕文本后延迟 0.5 秒验证是否命中任意一条规则（防止逐字输入时频繁校验）。
   // null 表示尚未验证（输入为空 / 正则有语法错误 / 没有规则）。
   const [testText, setTestText] = useState("");
   const [testMatched, setTestMatched] = useState<boolean | null>(null);
   useEffect(() => {
     const value = testText.trim();
-    if (!value || patternErrs.length > 0 || !patternList.some((p) => p.trim())) {
+    if (!value || patternErrs.length > 0 || !draft.rules.some((r) => r.pattern.trim())) {
       setTestMatched(null);
       return;
     }
     const timer = window.setTimeout(() => {
-      const regs = patternList
-        .filter((p) => p.trim())
-        .flatMap((p) => {
+      const regs = draft.rules
+        .filter((r) => r.pattern.trim())
+        .flatMap((r) => {
           try {
-            return [new RegExp(p.trim())];
+            return [new RegExp(r.pattern.trim())];
           } catch {
             return [];
           }
@@ -324,7 +341,7 @@ function QueueEditor({
       setTestMatched(regs.some((re) => re.test(value)));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [testText, patternList, patternErrs]);
+  }, [testText, draft.rules, patternErrs]);
 
   const sorted = useMemo(() => sortedQueueEntries(queue), [queue]);
   const live = useMemo(() => ({ ...queue, ...draft, entries: queue.entries }), [queue, draft]);
@@ -335,7 +352,6 @@ function QueueEditor({
   useEffect(() => {
     if (dirty) return;
     setDraft(queue);
-    setPatternText(queue.patterns.join("\n"));
   }, [queue, dirty]);
 
   /** 改草稿：只动本地状态，点「保存」/ Ctrl+S 才写数据库 */
@@ -345,24 +361,48 @@ function QueueEditor({
     setFailed(false);
   };
 
-  const changePatterns = (text: string) => {
-    setPatternText(text);
-    setDirty(true);
-    setFailed(false);
+  /** 改某条规则的正则；分组 / 颜色有独立处理函数 */
+  const changeRulePattern = (index: number, pattern: string) => {
+    patch({ rules: draft.rules.map((r, i) => (i === index ? { ...r, pattern } : r)) });
+  };
+
+  /** 改分组：已有分组自动沿用同组颜色，新分组从色板挑一个没用过的颜色 */
+  const changeRuleGroup = (index: number, group: string) => {
+    const color = nextGroupColor(draft.rules, group, index);
+    patch({ rules: draft.rules.map((r, i) => (i === index ? { ...r, group, color } : r)) });
+  };
+
+  /** 改颜色：同组所有规则一起改，保证一个分组只有一种颜色 */
+  const changeRuleColor = (index: number, color: string) => {
+    const group = draft.rules[index]?.group.trim() ?? "";
+    patch({
+      rules: draft.rules.map((r, i) =>
+        i === index || (group && r.group.trim() === group) ? { ...r, color } : r,
+      ),
+    });
+  };
+
+  const addRule = () => {
+    patch({
+      rules: [...draft.rules, { pattern: "", group: "", color: nextGroupColor(draft.rules, "") }],
+    });
+  };
+
+  const removeRule = (index: number) => {
+    patch({ rules: draft.rules.filter((_, i) => i !== index) });
   };
 
   const discard = () => {
     setDraft(queue);
-    setPatternText(queue.patterns.join("\n"));
     setDirty(false);
     setFailed(false);
   };
 
-  /** 保存整套配置：直播间 / 间隔 / 正则 / 排序 / 弹窗样式 */
+  /** 保存整套配置：直播间 / 规则 / 排序 / 弹窗样式 */
   const saveNow = async (): Promise<boolean> => {
     if (saving) return false;
     if (!dirty) return true;
-    if (patternErrors(patternList).length > 0 || !patternsValid) {
+    if (patternErrors(draft.rules).length > 0 || !patternsValid) {
       setFailed(true);
       reportError("正则不合法或为空，请修正后再保存");
       return false;
@@ -370,7 +410,7 @@ function QueueEditor({
     setSaving(true);
     setFailed(false);
     try {
-      const next = { ...draft, patterns: patternList };
+      const next = { ...draft, rules: normalizeRules(draft.rules) };
       await updateQueue(next);
       setDirty(false);
       reportError(null);
@@ -382,6 +422,11 @@ function QueueEditor({
     } finally {
       setSaving(false);
     }
+  };
+
+  const firePreview = (kind: QueueEffectPreview["kind"]) => {
+    previewSeq.current += 1;
+    setPreview({ kind, seq: previewSeq.current });
   };
 
   // 守卫给「切换页面 / 返回列表」用：始终读最新一次渲染的状态与草稿。
@@ -551,31 +596,92 @@ function QueueEditor({
         </div>
 
         <div className="mt-4">
-          <p className="text-xs text-slate-500 dark:text-slate-400">匹配正则（每行一条，任意命中即计数）</p>
-          <textarea
-            value={patternText}
-            onChange={(e) => changePatterns(e.target.value)}
-            rows={4}
-            spellCheck={false}
-            placeholder={"排队\n^排队$"}
-            className={`mt-1 w-full resize-y rounded-xl border bg-white px-3 py-2 font-mono text-sm text-slate-800 outline-none transition dark:bg-slate-950/60 dark:text-slate-200 ${
-              patternErrs.length > 0
-                ? "border-rose-500/60 focus:border-rose-500"
-                : "border-slate-300 focus:border-indigo-500 dark:border-slate-700"
-            }`}
-          />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              匹配规则（任意一条命中即计数；每条规则可绑定分组与颜色）
+            </p>
+            <button
+              type="button"
+              onClick={addRule}
+              className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+            >
+              ＋ 添加规则
+            </button>
+          </div>
+
+          <datalist id={groupListId}>
+            {groups.map((group) => (
+              <option key={group} value={group} />
+            ))}
+          </datalist>
+
+          <div className="mt-2 space-y-2">
+            {draft.rules.map((rule, index) => {
+              const err = patternErrs.find((e) => e.line === index + 1);
+              return (
+                <div key={index} className="flex flex-wrap items-center gap-2">
+                  <span className="w-5 shrink-0 text-right font-mono text-[11px] text-slate-400 dark:text-slate-600">
+                    {index + 1}
+                  </span>
+                  <input
+                    value={rule.pattern}
+                    onChange={(e) => changeRulePattern(index, e.target.value)}
+                    spellCheck={false}
+                    aria-label={`第 ${index + 1} 条正则`}
+                    placeholder="正则，例如：排队 / ^上车$"
+                    className={`min-w-0 flex-1 rounded-xl border bg-white px-3 py-2 font-mono text-sm text-slate-800 outline-none transition dark:bg-slate-950/60 dark:text-slate-200 ${
+                      err
+                        ? "border-rose-500/60 focus:border-rose-500"
+                        : "border-slate-300 focus:border-indigo-500 dark:border-slate-700"
+                    }`}
+                  />
+                  <input
+                    value={rule.group}
+                    onChange={(e) => changeRuleGroup(index, e.target.value)}
+                    list={groupListId}
+                    aria-label={`第 ${index + 1} 条规则的分组`}
+                    placeholder="分组（可留空）"
+                    title="可自行填写；输入已有分组会沿用同组颜色"
+                    className="w-28 rounded-xl border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200 dark:placeholder:text-slate-600"
+                  />
+                  <input
+                    type="color"
+                    value={rule.color || DEFAULT_GROUP_COLOR}
+                    onChange={(e) => changeRuleColor(index, e.target.value)}
+                    aria-label={`第 ${index + 1} 条规则的分组颜色`}
+                    title="分组颜色（同一分组共用一种颜色）"
+                    className="h-8 w-9 shrink-0 cursor-pointer rounded border border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeRule(index)}
+                    title="删除这条规则"
+                    className="h-8 w-8 shrink-0 rounded-lg border border-slate-300 text-sm text-slate-400 transition hover:border-rose-400 hover:text-rose-500 dark:border-slate-700 dark:text-slate-500"
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+            {draft.rules.length === 0 && (
+              <p className="rounded-xl border border-dashed border-slate-300 p-4 text-center text-xs text-slate-500 dark:border-slate-700 dark:text-slate-500">
+                还没有规则，点「＋ 添加规则」创建一条
+              </p>
+            )}
+          </div>
+
           {/* 正则测试：输入一条弹幕文本，0.5 秒后显示是否命中（✓ 命中 / ✗ 未命中） */}
           <div className="mt-2 flex items-center gap-2">
             <input
               value={testText}
               onChange={(e) => setTestText(e.target.value)}
               spellCheck={false}
-              placeholder="粘贴一条弹幕文本，验证是否命中上面的正则"
+              placeholder="粘贴一条弹幕文本，验证是否命中上面的规则"
               className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200 dark:placeholder:text-slate-600"
             />
             <span
               aria-live="polite"
-              title={testMatched === null ? "输入文本后验证" : testMatched ? "命中正则" : "未命中正则"}
+              title={testMatched === null ? "输入文本后验证" : testMatched ? "命中规则" : "未命中规则"}
               className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-lg font-semibold ${
                 testMatched === true
                   ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400"
@@ -594,11 +700,12 @@ function QueueEditor({
             <p className="mt-1 break-all text-[11px] text-rose-600 dark:text-rose-400">
               第 {patternErrs[0].line} 条正则不合法，暂未保存：{patternErrs[0].message}
             </p>
-          ) : patternList.filter((p) => p.trim()).length === 0 ? (
+          ) : draft.rules.filter((r) => r.pattern.trim()).length === 0 ? (
             <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">至少保留一条正则（例如：排队）</p>
           ) : (
             <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-600">
               示例：`排队` 命中含「排队」的弹幕；`^排队$` 只命中正好是「排队」的弹幕。
+              分组留空则成员不带分组；颜色按分组自动分配，可手动修改。
             </p>
           )}
         </div>
@@ -664,6 +771,51 @@ function QueueEditor({
           )}
         </div>
 
+        <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-slate-200 pt-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <MiniToggle
+            label="显示分组"
+            on={draft.showGroup}
+            onClick={() => patch({ showGroup: !draft.showGroup })}
+          />
+          <MiniToggle
+            label="昵称脱敏"
+            on={draft.maskNickname}
+            onClick={() => patch({ maskNickname: !draft.maskNickname })}
+          />
+          <label className="flex items-center gap-2">
+            新人入队特效
+            <select
+              value={draft.enterEffect}
+              onChange={(e) => patch({ enterEffect: e.target.value as QueueConfig["enterEffect"] })}
+              className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
+            >
+              {ENTER_EFFECTS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            数字 +1 特效
+            <select
+              value={draft.countEffect}
+              onChange={(e) => patch({ countEffect: e.target.value as QueueConfig["countEffect"] })}
+              className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200"
+            >
+              {COUNT_EFFECTS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="w-full text-[11px] leading-5 text-slate-400 dark:text-slate-600">
+            显示分组：在昵称与次数之间显示色块，色块中心是分组名；昵称脱敏保留首尾字符。
+            入队 / +1 特效只影响弹窗动画，可在下方「实时预览」里点击按钮试看。
+          </span>
+        </div>
+
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <NumberField label="位置 X" value={queue.x} min={-20_000} max={20_000} integer wide onChange={(v) => void run(moveQueue(queue.id, v, queue.y))} />
           <NumberField label="位置 Y" value={queue.y} min={-20_000} max={20_000} integer wide onChange={(v) => void run(moveQueue(queue.id, queue.x, v))} />
@@ -690,12 +842,30 @@ function QueueEditor({
       <section className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">实时预览</h3>
-          <span className="text-[11px] text-slate-400 dark:text-slate-600">
-            共 {queue.entries.length} 人 · 弹窗显示前 {Math.min(queue.entries.length, draft.maxEntries)} 人
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-slate-400 dark:text-slate-600">
+              共 {queue.entries.length} 人 · 弹窗显示前 {Math.min(queue.entries.length, draft.maxEntries)} 人
+            </span>
+            <button
+              type="button"
+              onClick={() => firePreview("enter")}
+              title="在预览里临时插入一位示例成员，演示新人入队特效"
+              className="rounded-lg border border-slate-300 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+            >
+              预览入队
+            </button>
+            <button
+              type="button"
+              onClick={() => firePreview("count")}
+              title="演示第一行的数字 +1 特效（没有成员时临时插入示例成员）"
+              className="rounded-lg border border-slate-300 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+            >
+              预览 +1
+            </button>
+          </div>
         </div>
         <div className="mt-3 flex min-h-36 items-start justify-center rounded-xl bg-gradient-to-br from-slate-800 via-slate-900 to-black p-6">
-          <QueueView cfg={live} />
+          <QueueView cfg={live} preview={preview} />
         </div>
       </section>
 

@@ -57,7 +57,7 @@ mod imp {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::QueueStatus;
-    use crate::store::{now_ms, QueueConfig, Store};
+    use crate::store::{now_ms, QueueConfig, QueueRule, Store};
 
     const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     const REFERER: &str = "https://live.bilibili.com/";
@@ -232,7 +232,7 @@ mod imp {
             queue.room_id,
             queue.name,
             queue.poll_secs,
-            queue.patterns.len()
+            queue.rules.len()
         );
 
         // 客户端初始化失败也不能直接结束任务：workers 表仍保留句柄，直接 return
@@ -261,7 +261,7 @@ mod imp {
         let mut attempt = 0u64;
         // 跨连接保留待写入弹幕：旧实现把它放在 stream_once 内，连接在两次刷新
         // 之间断开时，本批命中会随局部变量一起丢失。
-        let mut pending: Vec<(i64, String, i64)> = Vec::new();
+        let mut pending: Vec<(i64, String, i64, String)> = Vec::new();
         while !cancel.load(Ordering::Relaxed) {
             attempt += 1;
             patch_status(&app, queue_id, |s| {
@@ -338,7 +338,7 @@ mod imp {
         queue: &QueueConfig,
         host_turn: &mut usize,
         cancel: &Arc<AtomicBool>,
-        pending: &mut Vec<(i64, String, i64)>,
+        pending: &mut Vec<(i64, String, i64, String)>,
     ) -> Result<(), String> {
         let queue_id = queue.id;
 
@@ -566,7 +566,7 @@ mod imp {
             t0.elapsed().as_millis()
         );
 
-        let mut patterns = compile_patterns(&queue.patterns);
+        let mut patterns = compile_patterns(&queue.rules);
         let mut seen: VecDeque<(String, std::time::Instant)> = VecDeque::new();
         let mut connected = false;
         let mut last_message_written = 0i64;
@@ -661,13 +661,13 @@ mod imp {
                             log::info!("[弹幕] queue_id={queue_id} 队列已暂停，结束当前连接");
                             return Ok(());
                         }
-                        patterns = compile_patterns(&latest.patterns);
+                        patterns = compile_patterns(&latest.rules);
                     }
                     if !pending.is_empty() {
                         let hits = std::mem::take(pending);
                         // 排查用：打印本批真正要写入的 UID，和"收到弹幕"日志对照即可判断
                         // 是没收到、收到没命中、还是命中了没写进去。
-                        let uids: Vec<i64> = hits.iter().map(|(uid, _, _)| *uid).collect();
+                        let uids: Vec<i64> = hits.iter().map(|(uid, _, _, _)| *uid).collect();
                         log::info!(
                             "[弹幕] queue_id={queue_id} room={real_room_id} 准备写入本批命中 {} 条，UID={uids:?}",
                             hits.len()
@@ -849,14 +849,15 @@ mod imp {
                                         "[弹幕] queue_id={queue_id} room={real_room_id} 游客弹幕（uid=0），按昵称生成虚拟 UID={identity}：昵称={nickname:?}"
                                     );
                                 }
-                                let hit = patterns.iter().position(|re| re.is_match(&text));
+                                let hit = patterns.iter().position(|(re, _)| re.is_match(&text));
                                 let Some(rule_idx) = hit else {
                                     log::info!(
-                                        "[弹幕] queue_id={queue_id} room={real_room_id} 未命中：内容={text:?}（当前 {} 条正则均未匹配）",
+                                        "[弹幕] queue_id={queue_id} room={real_room_id} 未命中：内容={text:?}（当前 {} 条规则均未匹配）",
                                         patterns.len()
                                     );
                                     continue;
                                 };
+                                let group = patterns[rule_idx].1.clone();
                                 // 去重 key 不再依赖弹幕自带时间戳：B 站部分版本该字段是秒级
                                 // 或缺失后回退成同值，手动连发相同文本会被误判重复、不再 +1。
                                 // 改用「本队列内到达流水号」保证每条到达的弹幕都能独立计数。
@@ -870,10 +871,10 @@ mod imp {
                                 }
                                 matched += 1;
                                 log::info!(
-                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} identity={identity} 昵称={nickname:?} 内容={text:?}，待写入={}",
+                                    "[弹幕] queue_id={queue_id} room={real_room_id} 命中 +1：规则#{rule_idx} identity={identity} 昵称={nickname:?} 内容={text:?} 分组={group:?}，待写入={}",
                                     pending.len() + 1
                                 );
-                                pending.push((identity, nickname, at));
+                                pending.push((identity, nickname, at, group));
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
@@ -1120,10 +1121,14 @@ mod imp {
             .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
     }
 
-    fn compile_patterns(patterns: &[String]) -> Vec<regex::Regex> {
-        patterns
+    fn compile_patterns(rules: &[QueueRule]) -> Vec<(regex::Regex, String)> {
+        rules
             .iter()
-            .filter_map(|p| regex::Regex::new(p.trim()).ok())
+            .filter_map(|r| {
+                regex::Regex::new(r.pattern.trim())
+                    .ok()
+                    .map(|re| (re, r.group.trim().to_string()))
+            })
             .collect()
     }
 

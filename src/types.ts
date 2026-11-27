@@ -87,9 +87,25 @@ export interface QueueEntry {
   firstAt: number;
   /** 最近一次排队时间（毫秒时间戳） */
   lastAt: number;
+  /** 最近一次命中规则所属的分组（空 = 未分组） */
+  group: string;
 }
 
-/** 一个排队队列：独立的直播间、正则、排序与弹窗样式 */
+/** 一条匹配规则：正则 + 分组名 + 分组颜色 */
+export interface QueueRule {
+  pattern: string;
+  /** 命中后给成员打的组名（空 = 不分组） */
+  group: string;
+  /** #RRGGBB，同组共用 */
+  color: string;
+}
+
+/** 新人入队特效 */
+export type QueueEnterEffect = "none" | "fade" | "slide" | "zoom" | "pop";
+/** 数字 +1 特效 */
+export type QueueCountEffect = "none" | "bump" | "zoom" | "flash" | "glow" | "rise";
+
+/** 一个排队队列：独立的直播间、规则、排序与弹窗样式 */
 export interface QueueConfig {
   id: number;
   name: string;
@@ -97,14 +113,22 @@ export interface QueueConfig {
   roomId: number;
   /** 弹幕批量写入 / 界面刷新间隔（秒） */
   pollSecs: number;
-  /** 匹配弹幕文本的正则（任一命中即计数） */
-  patterns: string[];
+  /** 匹配弹幕文本的规则（任一命中即计数） */
+  rules: QueueRule[];
   /** time 按首次发送时间 | count 按发送次数 */
   sortMode: "time" | "count";
   /** 是否监听弹幕 */
   enabled: boolean;
   /** 弹窗最多显示多少人 */
   maxEntries: number;
+  /** 弹窗里是否在昵称后显示分组色块 */
+  showGroup: boolean;
+  /** 弹窗里是否对昵称做脱敏 */
+  maskNickname: boolean;
+  /** 新人入队特效 */
+  enterEffect: QueueEnterEffect;
+  /** 数字 +1 特效 */
+  countEffect: QueueCountEffect;
   shown: boolean;
   alwaysOnTop: boolean;
   clickThrough: boolean;
