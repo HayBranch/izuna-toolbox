@@ -62,7 +62,9 @@ export interface OverlayConfig {
   wrap: boolean;
   /** 自动换行最大宽度（逻辑像素） */
   maxWidth: number;
-  /** 手动尺寸（逻辑像素；0 = 自动按内容，>0 时窗口固定大小） */
+  /** 自动宽高：开启时按内容自适应，下面的宽高作为最小尺寸；关闭时固定宽高 */
+  autoSize: boolean;
+  /** 宽高（逻辑像素）。自动模式下是最小尺寸，固定模式下是窗口尺寸；0 = 无下限 */
   width: number;
   height: number;
   /** 创建时间（毫秒时间戳） */
@@ -144,7 +146,9 @@ export interface QueueConfig {
   bgOpacity: number;
   /** 自动宽度最大宽度（逻辑像素） */
   maxWidth: number;
-  /** 手动尺寸（0 = 自动按内容） */
+  /** 自动宽高：开启时按内容自适应，下面的宽高作为最小尺寸；关闭时固定宽高 */
+  autoSize: boolean;
+  /** 宽高（自动模式下是最小尺寸，固定模式下是窗口尺寸；0 = 无下限） */
   width: number;
   height: number;
   createdAt: number;

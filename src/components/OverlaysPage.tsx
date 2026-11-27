@@ -30,6 +30,7 @@ import {
   resetOverlayPosition,
   resizeOverlay,
   setOverlayAlwaysTop,
+  setOverlayAutoSize,
   setOverlayClickThrough,
   setOverlayShown,
   stepVariable,
@@ -724,7 +725,7 @@ function OverlayEditor({
             </div>
             <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-600">
               {draft.wrap
-                ? "自动模式：模板里的回车换行；超过最大宽度的长行折行。直接拖动浮窗边缘可改成固定宽高。"
+                ? "自动模式：模板里的回车换行；超过最大宽度的长行折行。拖动浮窗边缘可设置最小宽高。"
                 : "只有模板里的回车会换行；长行保持一行（超过屏幕会被截断）。"}
             </p>
           </div>
@@ -752,25 +753,32 @@ function OverlayEditor({
             <span className="text-xs text-slate-400 dark:text-slate-500">拖动浮窗自动保存</span>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <MiniToggle
+              label="自动宽高"
+              on={overlay.autoSize}
+              onClick={() => void run(setOverlayAutoSize(overlay.id, !overlay.autoSize))}
+            />
             <span className="text-slate-500 dark:text-slate-400">
               尺寸{" "}
               <span className="font-mono text-cyan-700 dark:text-cyan-300">
-                {overlay.width > 0 && overlay.height > 0
-                  ? `${overlay.width} × ${overlay.height}`
-                  : "自动按内容"}
+                {overlay.autoSize
+                  ? overlay.width > 0 || overlay.height > 0
+                    ? `最小 ${overlay.width || "自动"} × ${overlay.height || "自动"}`
+                    : "自动按内容"
+                  : `${overlay.width} × ${overlay.height}`}
               </span>
             </span>
             <button
               type="button"
               onClick={() => run(resizeOverlay(overlay.id, 0, 0))}
-              disabled={!(overlay.width > 0 && overlay.height > 0)}
-              title="恢复为按内容自动调整宽高"
+              disabled={!overlay.autoSize && overlay.width <= 0 && overlay.height <= 0}
+              title="恢复自动宽高并清除最小尺寸"
               className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 disabled:cursor-default disabled:opacity-40 disabled:hover:border-slate-300 disabled:hover:text-slate-500 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
             >
               恢复自动尺寸
             </button>
             <span className="text-slate-400 dark:text-slate-600">
-              直接拖动浮窗的边缘 / 角落即可改宽高
+              勾选时拖动边缘只会改最小尺寸，内容超出仍会自动变大；取消勾选则固定宽高
             </span>
           </div>
         </div>

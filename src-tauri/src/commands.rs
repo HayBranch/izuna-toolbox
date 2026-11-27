@@ -32,6 +32,16 @@ fn changed(app: &AppHandle, store: &Store) -> Result<Config, String> {
     Ok(config)
 }
 
+/// 读取弹窗当前逻辑尺寸（CSS 像素），用于切换自动宽高时把「最后一次的尺寸」记下来。
+fn current_logical_size(win: &WebviewWindow) -> Result<(i64, i64), String> {
+    let size = win.inner_size().map_err(|e| format!("读取窗口尺寸失败：{e}"))?;
+    let scale = win.scale_factor().unwrap_or(1.0);
+    Ok((
+        ((size.width as f64 / scale).round() as i64).max(1),
+        ((size.height as f64 / scale).round() as i64).max(1),
+    ))
+}
+
 /// 把弹窗移回当前显示器的可见中央；拿不到显示器信息时退回主屏 1920×1080 估算。
 fn centered_position(window: &WebviewWindow) -> (i32, i32) {
     let monitor = window
@@ -192,20 +202,20 @@ pub fn set_overlay_size(
         .ok_or("浮窗窗口不存在")?;
 
     let cfg = store.get().overlays.into_iter().find(|o| o.id == id);
-    // 手动尺寸优先：浮窗被拖动过宽高后，内容自适应不再覆盖它
-    let manual = cfg
-        .as_ref()
-        .map(|c| c.width > 0 && c.height > 0)
-        .unwrap_or(false);
-    let mut w = if manual {
-        cfg.as_ref().map(|c| c.width as f64).unwrap_or(40.0)
+    // 自动模式：按内容自适应，但保存的宽高作为最小尺寸（内容超出时继续变大）；
+    // 固定模式：忽略本次内容测量值，直接用保存的宽高。
+    let auto = cfg.as_ref().map(|c| c.auto_size).unwrap_or(true);
+    let min_w = cfg.as_ref().map(|c| c.width.max(0) as f64).unwrap_or(0.0);
+    let min_h = cfg.as_ref().map(|c| c.height.max(0) as f64).unwrap_or(0.0);
+    let mut w = if auto {
+        width.round().max(40.0).max(min_w)
     } else {
-        width.round().max(40.0)
+        cfg.as_ref().map(|c| c.width as f64).unwrap_or(40.0).max(40.0)
     };
-    let h = if manual {
-        cfg.as_ref().map(|c| c.height as f64).unwrap_or(28.0)
+    let h = if auto {
+        height.round().max(28.0).max(min_h)
     } else {
-        height.round().max(28.0)
+        cfg.as_ref().map(|c| c.height as f64).unwrap_or(28.0).max(28.0)
     };
     // 不允许浮窗比所在显示器还宽
     if let Ok(Some(monitor)) = win.current_monitor() {
@@ -219,6 +229,9 @@ pub fn set_overlay_size(
     win.set_size(tauri::LogicalSize::new(w, h))
         .map_err(|e| format!("调整浮窗尺寸失败：{e}"))?;
     overlay_win::mark_measured(&app, id);
+    // 不要把自动扩出来的尺寸写回 width/height：那会让「最小尺寸」被一路顶大，
+    // 内容缩回去时窗口也缩不回来，等于自动宽度失效。width/height 只由用户拖拽
+    // 或切换开关时显式记录。
 
     // 量好尺寸后走统一的窗口状态同步（含置顶策略）再决定显隐：
     // 不能直接 win.show()——那会让浮窗跳过"主窗口在前台时取消置顶"的判断，
@@ -240,21 +253,69 @@ pub fn resize_overlay(
     store: State<'_, Arc<Store>>,
 ) -> Result<Config, String> {
     check_permission(&window, id)?;
-    // 0/0 = 自动按内容；只要有一个为 0 也按自动处理，避免出现半手动状态
+    // 0/0 = 恢复自动（宽高下限也清零）；>0 时写宽高，但保持当前自动/固定模式。
     let (w, h) = if width > 0 && height > 0 {
         (width.max(40), height.max(28))
     } else {
         (0, 0)
     };
     store.set_size(id, w, h)?;
+    let auto = store
+        .get()
+        .overlays
+        .iter()
+        .find(|o| o.id == id)
+        .map(|c| c.auto_size)
+        .unwrap_or(true);
 
     if let Some(win) = app.get_webview_window(&overlay_win::overlay_label(id)) {
-        if w > 0 && h > 0 {
+        if !auto && w > 0 && h > 0 {
+            // 固定模式：写回用户指定的尺寸。
             win.set_size(tauri::LogicalSize::new(w as f64, h as f64))
                 .map_err(|e| format!("调整浮窗尺寸失败：{e}"))?;
             overlay_win::mark_measured(&app, id);
         }
-        // 恢复自动时不主动改大小：浮窗页面收到 config-changed 后会重新量内容。
+        // 恢复自动不改窗口尺寸：保持当前大小，前端只会在内容超出时继续扩窗。
+        if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
+            overlay_win::apply_window_state(&app, &win, &cfg, false)?;
+        }
+    }
+    changed(&app, &store)
+}
+
+/// 切换浮窗的自动宽高。关闭时把当前窗口尺寸固化下来，避免从自动切固定后尺寸丢失。
+#[tauri::command(async)]
+pub fn set_overlay_auto_size(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    auto: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_permission(&window, id)?;
+    let cfg = store
+        .get()
+        .overlays
+        .into_iter()
+        .find(|o| o.id == id)
+        .ok_or_else(|| format!("浮窗 #{id} 不存在"))?;
+    // width/height 是「用户拖出来的下限」，绝不能把自动扩出的尺寸写进去，否则下限
+    // 被顶大、内容缩回时窗口缩不回来，自动宽度就失效了。切换开关只改布尔值：
+    // - 开启自动：保留原下限（含 0 = 纯按内容）；
+    // - 关闭自动且从未设过下限：用当前窗口尺寸固化，保证固定模式有有效尺寸。
+    let (w, h) = if !auto && (cfg.width <= 0 || cfg.height <= 0) {
+        if let Some(win) = app.get_webview_window(&overlay_win::overlay_label(id)) {
+            current_logical_size(&win)?
+        } else {
+            (cfg.width.max(160), cfg.height.max(44))
+        }
+    } else {
+        (cfg.width, cfg.height)
+    };
+    // 不改窗口大小：切换开关不该让窗口突然变大变小。
+    store.set_overlay_auto_size(id, auto, w, h)?;
+    if let Some(win) = app.get_webview_window(&overlay_win::overlay_label(id)) {
+        // 只同步置顶 / 穿透 / 显隐，尺寸保持现状。
         if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == id) {
             overlay_win::apply_window_state(&app, &win, &cfg, false)?;
         }
@@ -599,19 +660,19 @@ pub fn set_queue_size(
         .ok_or("排队弹窗窗口不存在")?;
 
     let cfg = store.get().queues.into_iter().find(|q| q.id == id);
-    let manual = cfg
-        .as_ref()
-        .map(|c| c.width > 0 && c.height > 0)
-        .unwrap_or(false);
-    let mut w = if manual {
-        cfg.as_ref().map(|c| c.width as f64).unwrap_or(60.0)
+    // 自动模式按内容自适应，保存的宽高作为最小尺寸；固定模式忽略内容测量值。
+    let auto = cfg.as_ref().map(|c| c.auto_size).unwrap_or(true);
+    let min_w = cfg.as_ref().map(|c| c.width.max(0) as f64).unwrap_or(0.0);
+    let min_h = cfg.as_ref().map(|c| c.height.max(0) as f64).unwrap_or(0.0);
+    let mut w = if auto {
+        width.round().max(60.0).max(min_w)
     } else {
-        width.round().max(60.0)
+        cfg.as_ref().map(|c| c.width as f64).unwrap_or(60.0).max(60.0)
     };
-    let h = if manual {
-        cfg.as_ref().map(|c| c.height as f64).unwrap_or(40.0)
+    let h = if auto {
+        height.round().max(40.0).max(min_h)
     } else {
-        height.round().max(40.0)
+        cfg.as_ref().map(|c| c.height as f64).unwrap_or(40.0).max(40.0)
     };
     if let Ok(Some(monitor)) = win.current_monitor() {
         let scale = monitor.scale_factor();
@@ -624,6 +685,7 @@ pub fn set_queue_size(
     win.set_size(tauri::LogicalSize::new(w, h))
         .map_err(|e| format!("调整排队弹窗尺寸失败：{e}"))?;
     queue_win::mark_measured(&app, id);
+    // 同浮窗：自动扩出的尺寸不写回 width/height，避免最小尺寸被顶大后无法缩回。
     if let Some(cfg) = cfg {
         queue_win::apply_queue_window_state(&app, &win, &cfg, false)?;
     }
@@ -647,12 +709,56 @@ pub fn resize_queue(
         (0, 0)
     };
     store.set_queue_size(id, w, h)?;
+    let auto = store
+        .get()
+        .queues
+        .iter()
+        .find(|q| q.id == id)
+        .map(|c| c.auto_size)
+        .unwrap_or(true);
     if let Some(win) = app.get_webview_window(&queue_win::queue_label(id)) {
-        if w > 0 && h > 0 {
+        if !auto && w > 0 && h > 0 {
             win.set_size(tauri::LogicalSize::new(w as f64, h as f64))
                 .map_err(|e| format!("调整排队弹窗尺寸失败：{e}"))?;
             queue_win::mark_measured(&app, id);
         }
+        // 恢复自动不改窗口尺寸：保持当前大小，前端只会在内容超出时继续扩窗。
+        if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+            queue_win::apply_queue_window_state(&app, &win, &cfg, false)?;
+        }
+    }
+    changed(&app, &store)
+}
+
+/// 切换排队弹窗的自动宽高。关闭时把当前窗口尺寸固化下来。
+#[tauri::command(async)]
+pub fn set_queue_auto_size(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    auto: bool,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    check_queue_permission(&window, id)?;
+    let cfg = store
+        .get()
+        .queues
+        .into_iter()
+        .find(|q| q.id == id)
+        .ok_or_else(|| format!("队列 #{id} 不存在"))?;
+    // 同浮窗：开关只改布尔值，不把自动扩出的尺寸写成下限；不改窗口大小。
+    let (w, h) = if !auto && (cfg.width <= 0 || cfg.height <= 0) {
+        if let Some(win) = app.get_webview_window(&queue_win::queue_label(id)) {
+            current_logical_size(&win)?
+        } else {
+            (cfg.width.max(240), cfg.height.max(120))
+        }
+    } else {
+        (cfg.width, cfg.height)
+    };
+    store.set_queue_auto_size(id, auto, w, h)?;
+    if let Some(win) = app.get_webview_window(&queue_win::queue_label(id)) {
+        // 只同步置顶 / 穿透 / 显隐，尺寸保持现状。
         if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
             queue_win::apply_queue_window_state(&app, &win, &cfg, false)?;
         }

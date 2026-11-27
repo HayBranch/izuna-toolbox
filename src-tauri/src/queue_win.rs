@@ -119,7 +119,8 @@ pub fn apply_queue_window_state(
         // 手动宽高本身就是已知的有效尺寸，不需要再等前端自动测量。
         // 否则重启后前端因 manual=true 跳过 ResizeObserver，Rust 又一直等 measured，
         // 两边互相等待，表现为弹窗永远隐藏、显示开关无效，只能删除重建。
-        let has_manual_size = cfg.width > 0 && cfg.height > 0;
+        // 固定模式，或自动模式已存了最小尺寸：窗口已有有效尺寸，可以直接显示。
+        let has_manual_size = !cfg.auto_size || (cfg.width > 0 && cfg.height > 0);
         if has_manual_size || is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
             window.show().map_err(warn("显示排队弹窗失败"))?;
         } else {

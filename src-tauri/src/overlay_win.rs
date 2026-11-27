@@ -141,7 +141,8 @@ pub fn apply_window_state(
     // 自动尺寸必须等量好内容后才 show；手动宽高已经是有效尺寸，重启后可直接恢复，
     // 不能等一个在手动模式下不会发生的自动测量，否则显示开关会永远无效。
     if cfg.shown {
-        let has_manual_size = cfg.width > 0 && cfg.height > 0;
+        // 固定模式，或自动模式已存了最小尺寸：窗口已有有效尺寸，可以直接显示。
+        let has_manual_size = !cfg.auto_size || (cfg.width > 0 && cfg.height > 0);
         if has_manual_size || is_measured(app, cfg.id) || window.is_visible().unwrap_or(false) {
             window.show().map_err(warn("显示浮窗失败"))?;
         } else {

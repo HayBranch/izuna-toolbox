@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 /// 新规则没有指定颜色时的默认分组色（与前端色板第一项一致）。
 pub const DEFAULT_GROUP_COLOR: &str = "#3b82f6";
 
+/// 旧备份 / 旧库缺 `autoSize` 字段时按「自动宽高」处理（与历史默认行为一致）。
+fn default_true() -> bool {
+    true
+}
+
 /// 用户自定义变量（手动维护数值的"框框"），属于某一浮窗。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -92,7 +97,11 @@ pub struct OverlayConfig {
     pub wrap: bool,
     /// 自动换行最大宽度（逻辑像素；<=0 表示不限制）
     pub max_width: i64,
-    /// 手动尺寸（逻辑像素；0 = 自动按内容，>0 时固定窗口大小）
+    /// 自动宽高：开启时窗口按内容自适应；关闭时固定为下面的宽高
+    #[serde(default = "default_true")]
+    pub auto_size: bool,
+    /// 手动尺寸（逻辑像素）。自动模式下作为**最小尺寸**：内容超出时窗口会继续变大；
+    /// 关闭自动后就是固定尺寸。0 = 没有下限。
     pub width: i64,
     pub height: i64,
     /// 创建时间（毫秒时间戳）
@@ -223,7 +232,10 @@ pub struct QueueConfig {
     pub bg_opacity: u32,
     /// 自动宽度的最大宽度（逻辑像素）
     pub max_width: i64,
-    /// 手动尺寸（0 = 自动按内容）
+    /// 自动宽高：开启时按内容自适应，下面的宽高作为最小尺寸；关闭时固定宽高
+    #[serde(default = "default_true")]
+    pub auto_size: bool,
+    /// 手动尺寸（0 = 没有下限；关闭自动后就是固定尺寸）
     pub width: i64,
     pub height: i64,
     pub created_at: i64,
@@ -263,10 +275,11 @@ impl Default for QueueConfig {
             shadow: true,
             bg_color: "#0f172a".into(),
             bg_opacity: 55,
-            max_width: 360,
-            width: 0,
-            height: 0,
-            created_at: 0,
+        max_width: 360,
+        auto_size: true,
+        width: 0,
+        height: 0,
+        created_at: 0,
             updated_at: 0,
             entries: vec![],
         }
@@ -430,6 +443,7 @@ CREATE TABLE IF NOT EXISTS overlays (
     bg_opacity     INTEGER NOT NULL DEFAULT 55,
     wrap           INTEGER NOT NULL DEFAULT 1,
     max_width      INTEGER NOT NULL DEFAULT 460,
+    auto_size      INTEGER NOT NULL DEFAULT 1,
     width          INTEGER NOT NULL DEFAULT 0,
     height         INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
@@ -478,6 +492,7 @@ CREATE TABLE IF NOT EXISTS queues (
     bg_color       TEXT NOT NULL DEFAULT '#0f172a',
     bg_opacity     INTEGER NOT NULL DEFAULT 55,
     max_width      INTEGER NOT NULL DEFAULT 360,
+    auto_size      INTEGER NOT NULL DEFAULT 1,
     width          INTEGER NOT NULL DEFAULT 0,
     height         INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
@@ -584,6 +599,8 @@ impl Store {
             ("queues", "count_effect", "ALTER TABLE queues ADD COLUMN count_effect TEXT NOT NULL DEFAULT 'none'"),
             ("queue_entries", "group_name", "ALTER TABLE queue_entries ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"),
             ("queues", "group_font_size", "ALTER TABLE queues ADD COLUMN group_font_size INTEGER NOT NULL DEFAULT 0"),
+            ("overlays", "auto_size", "ALTER TABLE overlays ADD COLUMN auto_size INTEGER NOT NULL DEFAULT 1"),
+            ("queues", "auto_size", "ALTER TABLE queues ADD COLUMN auto_size INTEGER NOT NULL DEFAULT 1"),
         ];
         for (table, column, ddl) in queue_columns {
             let exists: i64 = conn
@@ -596,6 +613,15 @@ impl Store {
             if exists == 0 {
                 conn.execute_batch(ddl)
                     .map_err(|e| format!("迁移 {table}.{column} 失败：{e}"))?;
+                // 只在「auto_size 列刚补上」这一次把老库已有手动宽高的窗口标成固定尺寸。
+                // 绝不能每次启动都跑：否则用户开启自动后，只要 width/height>0（作为
+                // 最小尺寸保留），下次启动就会被改回关闭，表现为开关不持久化。
+                if column == "auto_size" {
+                    conn.execute_batch(&format!(
+                        "UPDATE {table} SET auto_size = 0 WHERE width > 0 AND height > 0;"
+                    ))
+                    .map_err(|e| format!("迁移 {table}.auto_size 历史尺寸失败：{e}"))?;
+                }
             }
         }
 
@@ -704,7 +730,7 @@ impl Store {
         };
         let mut overlays = Vec::new();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at FROM overlays ORDER BY id",
+            "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at, auto_size FROM overlays ORDER BY id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -735,6 +761,7 @@ impl Store {
                 height: row.get(18)?,
                 created_at: row.get(19)?,
                 updated_at: row.get(20)?,
+                auto_size: row.get::<_, i64>(21)? != 0,
                 variables: vec![],
                 computed: vec![],
             })
@@ -820,8 +847,36 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE overlays SET width = ?1, height = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE overlays SET width = ?1, height = ?2,
+                 auto_size = CASE WHEN ?1 = 0 AND ?2 = 0 THEN 1 ELSE auto_size END,
+                 updated_at = ?3 WHERE id = ?4",
                 params![width, height, now_ms(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("浮窗 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    /// 切换浮窗的自动宽高。开启时 width/height 保留为最小尺寸；关闭时作为固定尺寸。
+    pub fn set_overlay_auto_size(
+        &self,
+        id: i64,
+        auto: bool,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let (w, h) = if auto {
+            (width.max(0), height.max(0))
+        } else {
+            (width.max(40), height.max(28))
+        };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE overlays SET auto_size = ?1, width = ?2, height = ?3, updated_at = ?4 WHERE id = ?5",
+                params![auto as i64, w, h, now_ms(), id],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -1198,7 +1253,7 @@ impl Store {
         let conn = self.conn.lock().ok()?;
         let mut cfg = conn
             .query_row(
-                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size FROM queues WHERE id = ?1",
+                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size, auto_size FROM queues WHERE id = ?1",
                 params![id],
                 map_queue_row,
             )
@@ -1366,8 +1421,36 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn
             .execute(
-                "UPDATE queues SET width = ?1, height = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE queues SET width = ?1, height = ?2,
+                 auto_size = CASE WHEN ?1 = 0 AND ?2 = 0 THEN 1 ELSE auto_size END,
+                 updated_at = ?3 WHERE id = ?4",
                 params![width, height, now_ms(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("队列 #{id} 不存在"));
+        }
+        Ok(())
+    }
+
+    /// 切换排队弹窗的自动宽高。开启时 width/height 保留为最小尺寸；关闭时作为固定尺寸。
+    pub fn set_queue_auto_size(
+        &self,
+        id: i64,
+        auto: bool,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let (w, h) = if auto {
+            (width.max(0), height.max(0))
+        } else {
+            (width.max(60), height.max(40))
+        };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE queues SET auto_size = ?1, width = ?2, height = ?3, updated_at = ?4 WHERE id = ?5",
+                params![auto as i64, w, h, now_ms(), id],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -1894,14 +1977,15 @@ fn merge_entries(
 /// 写入一条浮窗记录（新浮窗与空库初始化共用）。
 fn insert_overlay(conn: &Connection, cfg: &OverlayConfig) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        "INSERT INTO overlays (id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, auto_size, width, height, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             cfg.id, cfg.name, cfg.account, cfg.template,
             cfg.shown as i64, cfg.always_on_top as i64, cfg.click_through as i64,
             cfg.x, cfg.y, cfg.font_size as i64, cfg.font_color,
             cfg.bold as i64, cfg.shadow as i64, cfg.bg_color, cfg.bg_opacity as i64,
-            cfg.wrap as i64, cfg.max_width, cfg.width, cfg.height, cfg.created_at, cfg.updated_at
+            cfg.wrap as i64, cfg.max_width, cfg.auto_size as i64,
+            cfg.width, cfg.height, cfg.created_at, cfg.updated_at
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1930,14 +2014,15 @@ fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
     }
     let rules = serde_json::to_string(&rules).map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+        "INSERT INTO queues (id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, auto_size, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         params![
             cfg.id, cfg.name, cfg.room_id, cfg.poll_secs as i64, rules, cfg.sort_mode,
             cfg.enabled as i64, cfg.max_entries as i64, cfg.shown as i64,
             cfg.always_on_top as i64, cfg.click_through as i64, cfg.x, cfg.y,
             cfg.font_size as i64, cfg.font_color, cfg.bold as i64, cfg.shadow as i64,
-            cfg.bg_color, cfg.bg_opacity as i64, cfg.max_width, cfg.width, cfg.height,
+            cfg.bg_color, cfg.bg_opacity as i64, cfg.max_width, cfg.auto_size as i64,
+            cfg.width, cfg.height,
             cfg.created_at, cfg.updated_at, cfg.show_group as i64, cfg.mask_nickname as i64,
             normalize_effect(&cfg.enter_effect, ENTER_EFFECTS),
             normalize_effect(&cfg.count_effect, COUNT_EFFECTS),
@@ -1986,6 +2071,7 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
         enter_effect: row.get(26)?,
         count_effect: row.get(27)?,
         group_font_size: row.get::<_, i64>(28)?.clamp(0, 72) as u32,
+        auto_size: row.get::<_, i64>(29)? != 0,
         entries: vec![],
     })
 }
@@ -1993,7 +2079,7 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
 /// 加载所有排队队列（含成员）。
 fn load_queues(conn: &Connection) -> Vec<QueueConfig> {
     let mut stmt = match conn.prepare(
-        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size FROM queues ORDER BY id",
+        "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size, auto_size FROM queues ORDER BY id",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -2077,6 +2163,7 @@ pub fn default_queue(id: i64, created_at: i64) -> QueueConfig {
         bg_color: "#0f172a".into(),
         bg_opacity: 55,
         max_width: 360,
+        auto_size: true,
         width: 0,
         height: 0,
         created_at,
@@ -2228,6 +2315,7 @@ pub fn default_overlay(id: i64, created_at: i64) -> OverlayConfig {
         bg_opacity: 55,
         wrap: true,
         max_width: 460,
+        auto_size: true,
         width: 0,
         height: 0,
         created_at,
@@ -2570,6 +2658,58 @@ mod queue_tests {
         )
         .unwrap();
         assert!(entry.group.is_empty());
+        assert!(cfg.auto_size, "旧备份缺 autoSize 时应默认自动宽高");
+    }
+
+    /// 自动宽高开关：关闭时固化当前宽高；0/0 恢复自动并清除最小尺寸。
+    #[test]
+    fn auto_size_toggle_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("izuna_auto_size_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+
+        let overlay_id = store.get().overlays[0].id;
+        assert!(store.get().overlays[0].auto_size);
+        store.set_overlay_auto_size(overlay_id, false, 321, 88).unwrap();
+        let o = store.get().overlays.into_iter().find(|o| o.id == overlay_id).unwrap();
+        assert!(!o.auto_size);
+        assert_eq!((o.width, o.height), (321, 88));
+        store.set_size(overlay_id, 0, 0).unwrap();
+        let o = store.get().overlays.into_iter().find(|o| o.id == overlay_id).unwrap();
+        assert!(o.auto_size);
+        assert_eq!((o.width, o.height), (0, 0));
+
+        let queue_id = store.next_queue_id();
+        store.push_queue(&default_queue(queue_id, now_ms())).unwrap();
+        store.set_queue_auto_size(queue_id, false, 400, 220).unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == queue_id).unwrap();
+        assert!(!q.auto_size);
+        assert_eq!((q.width, q.height), (400, 220));
+        store.set_queue_size(queue_id, 0, 0).unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == queue_id).unwrap();
+        assert!(q.auto_size);
+        assert_eq!((q.width, q.height), (0, 0));
+
+        // 回归：开启自动宽高后，即使还留着最小宽高，重启（重新打开数据库）也必须
+        // 保持开启。以前迁移语句每次启动都跑，会把这类记录错误地改回关闭。
+        store.set_overlay_auto_size(overlay_id, true, 180, 60).unwrap();
+        store.set_queue_auto_size(queue_id, true, 240, 120).unwrap();
+        drop(store);
+        let store = Store::new(db.clone()).unwrap();
+        let o = store.get().overlays.into_iter().find(|o| o.id == overlay_id).unwrap();
+        let q = store.get().queues.into_iter().find(|q| q.id == queue_id).unwrap();
+        assert!(o.auto_size, "重启后自动宽高应仍开启");
+        assert!(q.auto_size, "重启后自动宽高应仍开启");
+        assert_eq!((o.width, o.height), (180, 60), "最小尺寸应保留");
+        assert_eq!((q.width, q.height), (240, 120), "最小尺寸应保留");
+
+        store.delete_queue(queue_id).unwrap();
+        drop(store);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -41,8 +41,9 @@ export default function SubtitleView({
     borderRadius: 12,
     padding: `${SUBTITLE_PAD.y}px ${SUBTITLE_PAD.x}px`,
     lineHeight: 1.5,
-    // pre：仅模板里的回车换行；pre-wrap：回车 + 长行按最大宽度折行
-    whiteSpace: fill || cfg.wrap ? "pre-wrap" : "pre",
+    // pre：仅模板里的回车换行；pre-wrap：回车 + 长行按窗口宽度折行。
+    // 固定/自动模式都用同一套排版，窗口该多大由外层按实际溢出量决定。
+    whiteSpace: cfg.wrap ? "pre-wrap" : "pre",
     // 关键：按内容真实宽度排版，不受当前窗口宽度反向约束。
     // 否则窗口从小尺寸起步时，文字先按窄窗口折行，测量结果永远长不大，
     // 最大宽度调大也看不出效果。maxWidth 负责真正的宽度上限。
@@ -50,7 +51,7 @@ export default function SubtitleView({
     height: fill ? "100%" : undefined,
     maxWidth: fill ? "none" : cfg.wrap && cfg.maxWidth > 0 ? cfg.maxWidth : undefined,
     // 超宽的连续字符（无空格长串）也强制折进最大宽度内
-    overflowWrap: fill || cfg.wrap ? "anywhere" : undefined,
+    overflowWrap: cfg.wrap ? "anywhere" : undefined,
     overflow: fill ? "hidden" : undefined,
     boxSizing: fill ? "border-box" : undefined,
     userSelect: "none",

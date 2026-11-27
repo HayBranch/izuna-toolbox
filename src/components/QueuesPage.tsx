@@ -24,6 +24,7 @@ import {
   renameQueueEntry,
   resizeQueue,
   setQueueAlwaysTop,
+  setQueueAutoSize,
   setQueueClickThrough,
   setQueueEnabled,
   setQueueEntryCount,
@@ -970,18 +971,26 @@ function QueueEditor({
               onChange={(v) => patch({ maxWidth: v })}
             />
           </label>
+          <MiniToggle
+            label="自动宽高"
+            on={queue.autoSize}
+            onClick={() => void run(setQueueAutoSize(queue.id, !queue.autoSize))}
+          />
           <span className="text-slate-400 dark:text-slate-600">
-            手动尺寸：{queue.width > 0 && queue.height > 0 ? `${queue.width} × ${queue.height}` : "自动按内容"}
+            尺寸 {queue.autoSize ? `最小 ${queue.width || "自动"} × ${queue.height || "自动"}` : `${queue.width} × ${queue.height}`}
           </span>
-          {queue.width > 0 && queue.height > 0 && (
-            <button
-              type="button"
-              onClick={() => void run(resizeQueue(queue.id, 0, 0))}
-              className="rounded-lg border border-slate-300 px-2 py-0.5 text-[11px] text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-500"
-            >
-              恢复自动尺寸
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => void run(resizeQueue(queue.id, 0, 0))}
+            disabled={!queue.autoSize && queue.width <= 0 && queue.height <= 0}
+            title="恢复自动宽高并清除最小尺寸"
+            className="rounded-lg border border-slate-300 px-2 py-0.5 text-[11px] text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 disabled:cursor-default disabled:opacity-40 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-500"
+          >
+            恢复自动尺寸
+          </button>
+          <span className="text-[11px] text-slate-400 dark:text-slate-600">
+            勾选时拖动边缘只改最小尺寸，内容超出仍自动变大；取消勾选则固定宽高
+          </span>
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-slate-200 pt-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">

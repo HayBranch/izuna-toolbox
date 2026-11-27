@@ -85,9 +85,13 @@ export const deleteOverlay = (id: number) =>
 export const setOverlaySize = (width: number, height: number) =>
   invoke<void>("set_overlay_size", { width, height });
 
-/** 保存浮窗手动宽高（逻辑像素）；传 0/0 恢复自动按内容 */
+/** 保存浮窗宽高（逻辑像素）：自动模式下作最小尺寸，固定模式下作实际尺寸；0/0 恢复自动 */
 export const resizeOverlay = (id: number, width: number, height: number) =>
   cfged(invoke<AppConfig>("resize_overlay", { id, width, height }));
+
+/** 切换浮窗自动宽高；关闭时 Rust 会用当前窗口尺寸固化宽高 */
+export const setOverlayAutoSize = (id: number, auto: boolean) =>
+  cfged(invoke<AppConfig>("set_overlay_auto_size", { id, auto }));
 
 // ---------- 套内：自定义变量 / 计算变量 ----------
 // （账号只是浮窗的一个字段，走 updateOverlay 整卡保存）
@@ -155,9 +159,13 @@ export const deleteQueue = (id: number) =>
 export const setQueueSize = (width: number, height: number) =>
   invoke<void>("set_queue_size", { width, height });
 
-/** 保存排队弹窗手动宽高；0/0 恢复自动按内容 */
+/** 保存排队弹窗宽高：自动模式下作最小尺寸，固定模式下作实际尺寸；0/0 恢复自动 */
 export const resizeQueue = (id: number, width: number, height: number) =>
   cfged(invoke<AppConfig>("resize_queue", { id, width, height }));
+
+/** 切换排队弹窗自动宽高；关闭时 Rust 会用当前窗口尺寸固化宽高 */
+export const setQueueAutoSize = (id: number, auto: boolean) =>
+  cfged(invoke<AppConfig>("set_queue_auto_size", { id, auto }));
 
 export const addQueueEntry = (queueId: number, nickname: string, count = 1, group = "") =>
   cfged(invoke<AppConfig>("add_queue_entry", { queueId, nickname, count, group }));
