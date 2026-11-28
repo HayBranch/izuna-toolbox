@@ -136,6 +136,22 @@ pub fn add_overlay(
     changed(&app, &store)
 }
 
+/// 复制整套浮窗（含变量、计算变量与样式）：只从主窗口发起，新卡立即建窗。
+#[tauri::command(async)]
+pub fn duplicate_overlay(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    let new_id = store.duplicate_overlay(id)?;
+    if let Some(cfg) = store.get().overlays.into_iter().find(|o| o.id == new_id) {
+        overlay_win::sync_overlay_window(&app, &cfg, true)?;
+    }
+    changed(&app, &store)
+}
+
 /// 更新浮窗的名称/账号/模板/样式（不动位置；位置走 move_overlay 或拖动回写）。
 #[tauri::command(async)]
 pub fn update_overlay(
@@ -528,6 +544,23 @@ pub fn add_queue(
 
     store.push_queue(&cfg)?;
     if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == id) {
+        queue_win::sync_queue_window(&app, &cfg, true)?;
+    }
+    danmaku::reconcile(&app);
+    changed(&app, &store)
+}
+
+/// 复制整套队列（含规则、样式与成员名单）：只从主窗口发起，新队列立即建窗开监听。
+#[tauri::command(async)]
+pub fn duplicate_queue(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: i64,
+    store: State<'_, Arc<Store>>,
+) -> Result<Config, String> {
+    require_main(&window)?;
+    let new_id = store.duplicate_queue(id)?;
+    if let Some(cfg) = store.get().queues.into_iter().find(|q| q.id == new_id) {
         queue_win::sync_queue_window(&app, &cfg, true)?;
     }
     danmaku::reconcile(&app);

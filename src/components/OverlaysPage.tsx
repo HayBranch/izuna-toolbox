@@ -26,6 +26,7 @@ import {
   deleteComputed,
   deleteOverlay,
   deleteVariable,
+  duplicateOverlay,
   moveOverlay,
   resetOverlayPosition,
   resizeOverlay,
@@ -118,7 +119,8 @@ export default function OverlaysPage({ config }: { config: AppConfig }) {
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
-              列表先看基本信息，点名称进入配置；<strong className="font-medium text-slate-600 dark:text-slate-300">显示 / 置顶 / 鼠标穿透可以直接点标签开关</strong>，不用进详情。
+              列表先看基本信息，点名称进入配置；<strong className="font-medium text-slate-600 dark:text-slate-300">显示 / 置顶 / 鼠标穿透可以直接点标签开关</strong>，不用进详情，
+              点「复制」可按现有配置生成一套新浮窗。
               每套浮窗的变量、模板、样式完全独立；详情页改完点「保存」或按 Ctrl+S 才写入本地 SQLite，
               未保存时切换页面会提示。主窗口在前台时浮窗会临时取消置顶，切到游戏/桌面后恢复置顶，可直接拖动。
             </p>
@@ -216,6 +218,14 @@ function OverlayRow({
           />
         </div>
 
+        <button
+          type="button"
+          onClick={() => run(duplicateOverlay(overlay.id))}
+          title="复制一套新浮窗（变量、模板与样式完全相同，可再改）"
+          className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-emerald-500/10 hover:text-emerald-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-slate-500 dark:hover:text-emerald-300"
+        >
+          复制
+        </button>
         <button
           type="button"
           onClick={onOpen}

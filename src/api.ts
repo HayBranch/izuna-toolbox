@@ -58,6 +58,10 @@ export const getConfig = () => cfged(invoke<AppConfig>("get_config"));
 
 export const addOverlay = () => cfged(invoke<AppConfig>("add_overlay"));
 
+/** 复制整套浮窗（变量 / 计算变量 / 样式一并复制，变量联动重新指向副本） */
+export const duplicateOverlay = (id: number) =>
+  cfged(invoke<AppConfig>("duplicate_overlay", { id }));
+
 export const updateOverlay = (overlay: OverlayConfig) =>
   cfged(invoke<AppConfig>("update_overlay", { overlay }));
 
@@ -128,6 +132,10 @@ export const deleteComputed = (overlayId: number, id: number) =>
 // ---------- 排队队列 ----------
 
 export const addQueue = () => cfged(invoke<AppConfig>("add_queue"));
+
+/** 复制整套队列（规则 / 样式 / 成员名单一并复制） */
+export const duplicateQueue = (id: number) =>
+  cfged(invoke<AppConfig>("duplicate_queue", { id }));
 
 /** 保存队列的直播间、正则、排序与弹窗样式（位置/显隐走独立命令） */
 export const updateQueue = (queue: QueueConfig) =>

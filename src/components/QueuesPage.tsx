@@ -18,6 +18,7 @@ import {
   clearQueueEntries,
   deleteQueue,
   deleteQueueEntry,
+  duplicateQueue,
   getQueueStatus,
   moveQueue,
   resetQueuePosition,
@@ -143,8 +144,8 @@ export default function QueuesPage({ config }: { config: AppConfig }) {
               <strong className="font-medium text-slate-600 dark:text-slate-300">
                 「刷新间隔」只控制批量写入与界面刷新频率
               </strong>
-              。列表里的监听 / 显示 / 置顶 / 穿透可以直接点标签切换。详情页改完点「保存」或按 Ctrl+S 才写入本地 SQLite，
-              未保存时切换页面会提示。
+              。列表里的监听 / 显示 / 置顶 / 穿透可以直接点标签切换，点「复制」可按现有队列生成新队列。
+              详情页改完点「保存」或按 Ctrl+S 才写入本地 SQLite，未保存时切换页面会提示。
             </p>
             <button
               onClick={() => void create()}
@@ -275,6 +276,14 @@ function QueueRow({
           />
         </div>
 
+        <button
+          type="button"
+          onClick={() => run(duplicateQueue(queue.id))}
+          title="复制一个新队列（规则、样式与成员名单完全相同，可再改）"
+          className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-emerald-500/10 hover:text-emerald-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-slate-500 dark:hover:text-emerald-300"
+        >
+          复制
+        </button>
         <button
           type="button"
           onClick={onOpen}

@@ -738,34 +738,7 @@ impl Store {
                 return Config::default();
             }
         };
-        let rows = stmt.query_map([], |row| {
-            Ok(OverlayConfig {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                account: row.get(2)?,
-                template: row.get(3)?,
-                shown: row.get::<_, i64>(4)? != 0,
-                always_on_top: row.get::<_, i64>(5)? != 0,
-                click_through: row.get::<_, i64>(6)? != 0,
-                x: row.get(7)?,
-                y: row.get(8)?,
-                font_size: row.get::<_, i64>(9)? as u32,
-                font_color: row.get(10)?,
-                bold: row.get::<_, i64>(11)? != 0,
-                shadow: row.get::<_, i64>(12)? != 0,
-                bg_color: row.get(13)?,
-                bg_opacity: row.get::<_, i64>(14)? as u32,
-                wrap: row.get::<_, i64>(15)? != 0,
-                max_width: row.get(16)?,
-                width: row.get(17)?,
-                height: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-                auto_size: row.get::<_, i64>(21)? != 0,
-                variables: vec![],
-                computed: vec![],
-            })
-        });
+        let rows = stmt.query_map([], map_overlay_row);
         if let Ok(rows) = rows {
             for cfg in rows.filter_map(|r| r.ok()) {
                 let mut cfg = cfg;
@@ -805,6 +778,36 @@ impl Store {
     pub fn push_overlay(&self, cfg: &OverlayConfig) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         insert_overlay(&conn, cfg)
+    }
+
+    /// 复制整套浮窗：新 id / 新名字，变量与计算变量原样复制，跟随联动按新旧 id
+    /// 重新映射。整个复制在一个事务里，中途失败不会留下半张卡。
+    /// 返回新浮窗 id，由命令层负责建窗与广播。
+    pub fn duplicate_overlay(&self, id: i64) -> Result<i64, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut cfg: OverlayConfig = tx
+            .query_row(
+                "SELECT id, name, account, template, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, wrap, max_width, width, height, created_at, updated_at, auto_size FROM overlays WHERE id = ?1",
+                params![id],
+                map_overlay_row,
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("浮窗 #{id} 不存在"))?;
+        cfg.variables = load_variables(&tx, id);
+        cfg.computed = load_computed(&tx, id);
+
+        let new_id = next_id(&tx, "overlays")?;
+        cfg.name = unique_copy_name(&tx, "overlays", &cfg.name)?;
+        // 略微错开，避免新浮窗和原浮窗完全叠在一起看不见
+        cfg.x = cfg.x.saturating_add(28);
+        cfg.y = cfg.y.saturating_add(28);
+        cfg.created_at = now_ms();
+        cfg.updated_at = cfg.created_at;
+        insert_overlay_full(&tx, &cfg, new_id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(new_id)
     }
 
     /// 更新浮窗的名称/账号/模板/样式（**有意不更新 x/y**——位置只由拖动回写和
@@ -1235,6 +1238,59 @@ impl Store {
     pub fn push_queue(&self, cfg: &QueueConfig) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         insert_queue(&conn, cfg)
+    }
+
+    /// 复制整套队列：新 id / 新名字，规则、样式与成员名单原样复制。
+    /// 名单逐行插入（不走导入的合并逻辑），保留游客的负 uid 与原始时间。
+    pub fn duplicate_queue(&self, id: i64) -> Result<i64, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut cfg: QueueConfig = tx
+            .query_row(
+                "SELECT id, name, room_id, poll_secs, patterns, sort_mode, enabled, max_entries, shown, always_on_top, click_through, x, y, font_size, font_color, bold, shadow, bg_color, bg_opacity, max_width, width, height, created_at, updated_at, show_group, mask_nickname, enter_effect, count_effect, group_font_size, auto_size FROM queues WHERE id = ?1",
+                params![id],
+                map_queue_row,
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("队列 #{id} 不存在"))?;
+        cfg.entries = load_queue_entries(&tx, id);
+
+        let new_id = next_id(&tx, "queues")?;
+        cfg.name = unique_copy_name(&tx, "queues", &cfg.name)?;
+        cfg.x = cfg.x.saturating_add(28);
+        cfg.y = cfg.y.saturating_add(28);
+        cfg.created_at = now_ms();
+        cfg.updated_at = cfg.created_at;
+
+        let mut copy = cfg.clone();
+        copy.id = new_id;
+        copy.entries.clear();
+        insert_queue(&tx, &copy)?;
+        for e in &cfg.entries {
+            let nickname = e.nickname.trim();
+            if nickname.is_empty() {
+                continue;
+            }
+            let first_at = if e.first_at > 0 { e.first_at } else { cfg.created_at };
+            let last_at = if e.last_at > 0 { e.last_at } else { first_at };
+            tx.execute(
+                "INSERT INTO queue_entries (queue_id, uid, nickname, count, first_at, last_at, group_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    new_id,
+                    e.uid,
+                    nickname,
+                    e.count.max(1),
+                    first_at,
+                    last_at,
+                    e.group.trim()
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(new_id)
     }
 
     pub fn queue_exists(&self, id: i64) -> bool {
@@ -1835,6 +1891,32 @@ fn next_id(conn: &Connection, table: &str) -> Result<i64, String> {
     Ok(now_ms().max(max + 1))
 }
 
+/// 复制品的名字：原名 + 「副本」，重名时依次加 2、3…，避免列表里分不清。
+fn unique_copy_name(conn: &Connection, table: &str, source: &str) -> Result<String, String> {
+    let base = source.trim();
+    let base = if base.is_empty() { "未命名" } else { base };
+    let mut stmt = conn
+        .prepare(&format!("SELECT name FROM {table}"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let names: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+
+    let candidate = format!("{base} 副本");
+    if !names.contains(&candidate) {
+        return Ok(candidate);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} 副本 {n}");
+        if !names.contains(&candidate) {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
 /// 写入一套浮窗及其变量/计算变量（导入共用，id 由调用方分配）。
 fn insert_overlay_full(conn: &Connection, cfg: &OverlayConfig, new_id: i64) -> Result<(), String> {
     let mut overlay = cfg.clone();
@@ -2031,6 +2113,36 @@ fn insert_queue(conn: &Connection, cfg: &QueueConfig) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 与 `Store::get()` / 复制浮窗共用的行映射（变量与计算变量另行加载）。
+fn map_overlay_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OverlayConfig> {
+    Ok(OverlayConfig {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        account: row.get(2)?,
+        template: row.get(3)?,
+        shown: row.get::<_, i64>(4)? != 0,
+        always_on_top: row.get::<_, i64>(5)? != 0,
+        click_through: row.get::<_, i64>(6)? != 0,
+        x: row.get(7)?,
+        y: row.get(8)?,
+        font_size: row.get::<_, i64>(9)? as u32,
+        font_color: row.get(10)?,
+        bold: row.get::<_, i64>(11)? != 0,
+        shadow: row.get::<_, i64>(12)? != 0,
+        bg_color: row.get(13)?,
+        bg_opacity: row.get::<_, i64>(14)? as u32,
+        wrap: row.get::<_, i64>(15)? != 0,
+        max_width: row.get(16)?,
+        width: row.get(17)?,
+        height: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
+        auto_size: row.get::<_, i64>(21)? != 0,
+        variables: vec![],
+        computed: vec![],
+    })
 }
 
 fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueConfig> {
@@ -2550,6 +2662,47 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_overlay_copies_variables_and_relinks_follow() {
+        let (store, dir) = test_store();
+        let source = var(&store, "A3");
+        set_follow(&store, "A1", "A3");
+        store.step_variable(1, source.id, 2.0).unwrap();
+        let original = store.get().overlays[0].clone();
+
+        let new_id = store.duplicate_overlay(original.id).unwrap();
+        assert_ne!(new_id, original.id);
+        let all = store.get().overlays;
+        let copy = all.iter().find(|o| o.id == new_id).unwrap();
+        assert_eq!(copy.name, format!("{} 副本", original.name));
+        assert_eq!(copy.template, original.template);
+        assert_eq!(copy.account, original.account);
+        assert_eq!(copy.variables.len(), original.variables.len());
+        assert_eq!(copy.computed.len(), original.computed.len());
+        for (src, dst) in original.variables.iter().zip(&copy.variables) {
+            assert_ne!(src.id, dst.id, "副本变量必须用新 id");
+            assert_eq!((src.key.as_str(), src.value), (dst.key.as_str(), dst.value));
+        }
+        // 联动必须指向副本自己的变量，不能还指着原卡的 id
+        let src_follow = original.variables.iter().find(|v| v.key == "A1").unwrap().follow_id;
+        let src_target = original.variables.iter().find(|v| v.id == src_follow).unwrap().key.clone();
+        let dst_follow = copy.variables.iter().find(|v| v.key == "A1").unwrap().follow_id;
+        let dst_target = copy.variables.iter().find(|v| v.id == dst_follow).unwrap().key.clone();
+        assert_eq!(dst_target, src_target);
+        assert_eq!(dst_follow, copy.variables.iter().find(|v| v.key == "A3").unwrap().id);
+
+        // 连续复制第二份时名字自动加序号
+        let second_id = store.duplicate_overlay(original.id).unwrap();
+        let second = store.get().overlays.into_iter().find(|o| o.id == second_id).unwrap();
+        assert_eq!(second.name, format!("{} 副本 2", original.name));
+        // 原卡数值不受副本影响
+        let untouched = store.get().overlays.into_iter().find(|o| o.id == original.id).unwrap();
+        for (a, b) in untouched.variables.iter().zip(&original.variables) {
+            assert_eq!((a.id, a.value, a.follow_id), (b.id, b.value, b.follow_id));
+        }
+        cleanup(store, dir);
+    }
+
+    #[test]
     fn merge_from_skips_same_overlay_and_merges_queue_entries() {
         let (store, dir) = test_store();
         let existing_name = store.get().overlays[0].name.clone();
@@ -2639,6 +2792,73 @@ mod tests {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[test]
+    fn duplicate_queue_copies_rules_and_entries_exactly() {
+        let dir = std::env::temp_dir().join(format!("izuna_duplicate_queue_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+        let store = Store::new(db.clone()).unwrap();
+        let id = store.next_queue_id();
+        let mut cfg = default_queue(id, now_ms());
+        cfg.name = "排队".into();
+        cfg.room_id = 12345;
+        cfg.rules = vec![QueueRule {
+            pattern: "上车".into(),
+            group: "一组".into(),
+            color: "#ff0000".into(),
+        }];
+        store.push_queue(&cfg).unwrap();
+        // push_queue 只写队列本体；名单走正常命令写入，才能测到真实库里的行
+        for (uid, name, at, group) in [
+            (1001, "阿一", 1000, "一组"),
+            (1001, "阿一", 2000, "一组"),
+            (-1, "游客", 1000, ""),
+            (-1, "游客", 1500, ""),
+        ] {
+            store
+                .record_queue_matches(id, &[(uid, name.into(), at, group.into())])
+                .unwrap();
+        }
+        let source = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        let member_id = source.entries.iter().find(|e| e.uid == 1001).unwrap().id;
+        store.set_queue_entry_count(id, member_id, 5).unwrap();
+        let source = store.get().queues.into_iter().find(|q| q.id == id).unwrap();
+        let src_member = source.entries.iter().find(|e| e.uid == 1001).unwrap().clone();
+        let src_guest = source.entries.iter().find(|e| e.uid == -1).unwrap().clone();
+
+        let new_id = store.duplicate_queue(id).unwrap();
+        assert_ne!(new_id, id);
+        let after = store.get().queues;
+        let copy = after.iter().find(|q| q.id == new_id).unwrap();
+        assert_eq!(copy.name, "排队 副本");
+        assert_eq!(copy.room_id, 12345);
+        assert_eq!(copy.rules.len(), 1);
+        assert_eq!(copy.rules[0].pattern, "上车");
+        assert_eq!(copy.rules[0].group, "一组");
+        assert_eq!(copy.entries.len(), 2);
+        let member = copy.entries.iter().find(|e| e.uid == 1001).unwrap();
+        assert_eq!(
+            (member.nickname.as_str(), member.count, member.group.as_str()),
+            (src_member.nickname.as_str(), src_member.count, src_member.group.as_str())
+        );
+        assert_eq!((member.first_at, member.last_at), (src_member.first_at, src_member.last_at));
+        // 游客的负 uid 不能被导入合并逻辑抹成 0
+        let guest = copy.entries.iter().find(|e| e.nickname == "游客").unwrap();
+        assert_eq!(
+            (guest.uid, guest.count, guest.first_at, guest.last_at),
+            (src_guest.uid, src_guest.count, src_guest.first_at, src_guest.last_at)
+        );
+        assert_eq!(guest.uid, -1);
+
+        let original = after.iter().find(|q| q.id == id).unwrap();
+        assert_eq!(original.entries.len(), 2);
+        assert!(original.entries.iter().any(|e| e.uid == 1001 && e.count == 5));
+        store.delete_queue(new_id).unwrap();
+        store.delete_queue(id).unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 回归：v0.1.5 及更早的备份 / 数据库里规则是纯字符串数组，
     /// 新版本必须能原样读入（分组、颜色留空），不能因为格式变化丢规则。
