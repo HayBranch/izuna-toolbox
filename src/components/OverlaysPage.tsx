@@ -45,6 +45,7 @@ import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
 import SubtitleView from "./SubtitleView";
 import { useUnsavedGuard } from "./UnsavedGuard";
+import { useSaveShortcut } from "./useSaveShortcut";
 
 /** 多行示例模板：一键替换成推荐排版（与后端 DEFAULT_TEMPLATE 一致） */
 const EXAMPLE_TEMPLATE = [
@@ -355,6 +356,11 @@ function OverlayEditor({
     }
   };
 
+  // 快捷键挂在 window 上：焦点在页面空白 / 预览区 / 左侧导航时也能保存。
+  useSaveShortcut(() => {
+    void saveNow();
+  });
+
   // 守卫给「切换页面 / 返回列表」用：始终读最新一次渲染的状态与草稿。
   const latest = useRef({ dirty, saving, saveNow, discard });
   latest.current = { dirty, saving, saveNow, discard };
@@ -451,15 +457,7 @@ function OverlayEditor({
         : "saved";
 
   return (
-    <div
-      className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60"
-      onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-          e.preventDefault();
-          void saveNow();
-        }
-      }}
-    >
+    <div className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60">
       {/* 头部：返回 + 名称 + 创建时间 + 三个开关 + 保存/删除 */}
       <div className="flex flex-wrap items-center gap-3">
         <button

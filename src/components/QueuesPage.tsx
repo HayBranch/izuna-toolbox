@@ -49,6 +49,7 @@ import ConfirmDelete from "./ConfirmDelete";
 import { ChipToggle, ColorField, InlineNumber, MiniToggle, NumberField, Toggle } from "./Fields";
 import QueueView, { type QueueEffectPreview } from "./QueueView";
 import { useUnsavedGuard } from "./UnsavedGuard";
+import { useSaveShortcut } from "./useSaveShortcut";
 
 type Run = (p: Promise<unknown>) => Promise<boolean>;
 
@@ -630,6 +631,11 @@ function QueueEditor({
     }
   };
 
+  // 快捷键挂在 window 上：焦点在页面空白 / 预览区 / 左侧导航时也能保存。
+  useSaveShortcut(() => {
+    void saveNow();
+  });
+
   const firePreview = (kind: QueueEffectPreview["kind"]) => {
     previewSeq.current += 1;
     setPreview({ kind, seq: previewSeq.current });
@@ -671,15 +677,7 @@ function QueueEditor({
         : "saved";
 
   return (
-    <div
-      className="space-y-5"
-      onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-          e.preventDefault();
-          void saveNow();
-        }
-      }}
-    >
+    <div className="space-y-5">
       {/* 头部 */}
       <div className="rounded-2xl border border-slate-200 bg-white/70 p-5 dark:border-slate-800 dark:bg-slate-900/60">
         <div className="flex flex-wrap items-center gap-3">
